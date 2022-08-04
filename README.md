@@ -1,6 +1,6 @@
 ## Flash Cosine Similarity Attention (wip)
 
-Implementation of fused cosine similarity attention in the same style as <a href="https://arxiv.org/abs/2205.14135">Flash Attention</a>. This will be my first attempt at CUDA, so welcome any help or advice.
+Implementation of fused cosine similarity attention in the same style as <a href="https://arxiv.org/abs/2205.14135">Flash Attention</a>. The observation is that by adopting l2-normalized queries and keys, you no longer need to keep track of the row maximums for numerical stability. This greatly simplifies the flash attention algorithm, assuming cosine similarity attention comes at no generalization cost. This will be my first attempt at CUDA, so welcome any help or advice.
 
 ## Citations
 
