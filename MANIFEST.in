@@ -1,0 +1,1 @@
+recursive-include flash_cosine_sim_attention *.cu

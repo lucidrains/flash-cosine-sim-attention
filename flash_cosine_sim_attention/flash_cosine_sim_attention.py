@@ -2,6 +2,10 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Function
 
+# try to import cuda
+
+from .flash_cosine_sim_attention_cuda import forward, backward
+
 # helper functions
 
 def l2norm(t):
@@ -15,13 +19,15 @@ class FlashCosineSimAttention(Function):
         ctx,
         q, k, v
     ):
-        ctx.save_for_backward(q, k, v)
+        o, l = forward(q, k, v)
+        ctx.save_for_backward(o, l, q, k, v)
         return q
 
     @staticmethod
     def backward(ctx, do):
-        q, k, v = ctx.saved_tensors
-        return q, k, v
+        o, l, q, k, v = ctx.saved_tensors
+        dq, dk, dv = backward(do, o, l, q, k, v)
+        return dq, dk, dv
 
 # wrapper function
 
