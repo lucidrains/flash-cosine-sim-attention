@@ -4,7 +4,10 @@ from torch.autograd import Function
 
 # try to import cuda
 
-from .flash_cosine_sim_attention_cuda import forward, backward
+try:
+    from flash_cosine_sim_attention_cuda import forward, backward
+except ImportError:
+    print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')
 
 # helper functions
 

@@ -1,8 +1,9 @@
 #include <torch/extension.h>
 
-torch::Tensor flash_cosine_sim_attention_forward(torch::Tensor q, torch::Tensor k,  torch::Tensor v) {
+std::vector<torch::Tensor> flash_cosine_sim_attention_forward(torch::Tensor q, torch::Tensor k,  torch::Tensor v) {
     auto o = torch::zeros_like(q);
-    return o;
+    auto l = torch::zeros_like(q);
+    return {o, l};
 }
 
 std::vector<torch::Tensor> flash_cosine_sim_attention_backward(torch::Tensor grad_o, torch::Tensor o, torch::Tensor l, torch::Tensor q,  torch::Tensor k,  torch::Tensor v) {
