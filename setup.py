@@ -6,6 +6,11 @@ from setuptools import setup, find_packages
 import torch
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
+# the following code was taken from
+# https://github.com/teddykoker/torchsort/blob/main/setup.py
+# which in turn was taken from
+# https://github.com/idiap/fast-transformers/blob/master/setup.py
+
 @lru_cache(None)
 def cuda_toolkit_available():
   try:
@@ -30,6 +35,8 @@ def ext_modules():
       sources = ["flash_cosine_sim_attention/flash_cosine_sim_attention_cuda.cu"]
     )
   ]
+
+# main setup code
 
 setup(
   name = 'flash-cosine-sim-attention',
