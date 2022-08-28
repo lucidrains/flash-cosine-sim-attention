@@ -50,8 +50,8 @@ class FlashCosineSimAttention(Function):
 def flash_cosine_sim_attention(
     q, k, v,
     scale = 8,
-    q_block_size = 128,
-    k_block_size = 128
+    q_block_size = 32,
+    k_block_size = 32
 ):
     q, k = map(l2norm, (q, k))
     o = FlashCosineSimAttention.apply(q, k, v, scale, q_block_size, k_block_size)
