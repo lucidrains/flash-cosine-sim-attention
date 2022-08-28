@@ -30,15 +30,18 @@ __global__ void backward_kernel(
 
 // main c++ function
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_forward(torch::Tensor q, torch::Tensor k,  torch::Tensor v, float scale) {
+std::vector<torch::Tensor> flash_cosine_sim_attention_forward(torch::Tensor q, torch::Tensor k,  torch::Tensor v, float scale, int q_block_size, int k_block_size) {
     auto o = torch::zeros_like(q);
     auto l = torch::zeros_like(q).sum({-1,});
 
-    const int blocks = 1;
-    const int threads = 1;
+    const int batch = q.size(0);
+    const int heads = q.size(1);
+
+    const dim3 threads_per_block(q_block_size, k_block_size);
+    const int blocks = batch * heads;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
-        forward_kernel<scalar_t><<<blocks, threads>>>(
+        forward_kernel<scalar_t><<<blocks, threads_per_block>>>(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
@@ -50,16 +53,19 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(torch::Tensor q, t
     return {o, l};
 }
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_backward(torch::Tensor grad_o, torch::Tensor o, torch::Tensor l, torch::Tensor q,  torch::Tensor k,  torch::Tensor v, float scale) {
+std::vector<torch::Tensor> flash_cosine_sim_attention_backward(torch::Tensor grad_o, torch::Tensor o, torch::Tensor l, torch::Tensor q,  torch::Tensor k,  torch::Tensor v, float scale, int q_block_size, int k_block_size) {
     auto dq = torch::zeros_like(q);
     auto dk = torch::zeros_like(k);
     auto dv = torch::zeros_like(v);
 
-    const int blocks = 1;
-    const int threads = 1;
+    const int batch = dq.size(0);
+    const int heads = dq.size(1);
+
+    const dim3 threads_per_block(q_block_size, k_block_size);
+    const int blocks = batch * heads;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
-        backward_kernel<scalar_t><<<blocks, threads>>>(
+        backward_kernel<scalar_t><<<blocks, threads_per_block>>>(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),

@@ -54,7 +54,7 @@ setup(
     'attention mechanism'
   ],
   install_requires=[
-    'torch>=1.6',
+    'torch>=1.10',
   ],
   ext_modules = ext_modules(),
   cmdclass = {"build_ext": BuildExtension},
