@@ -1,36 +1,50 @@
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include <torch/extension.h>
+
+// type alias
+
+template <typename scalar_t, int dims>
+using PackedAccessor = torch::PackedTensorAccessor32<scalar_t, dims, torch::RestrictPtrTraits>;
 
 // cuda kernels
 
 template <typename scalar_t>
 __global__ void forward_kernel(
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> q,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> k,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> v,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> o,
-    torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> l,
+    const PackedAccessor<scalar_t, 4> q,
+    const PackedAccessor<scalar_t, 4> k,
+    const PackedAccessor<scalar_t, 4> v,
+          PackedAccessor<scalar_t, 4> o,
+          PackedAccessor<scalar_t, 3> l,
     float scale) {
 
 }
 
 template <typename scalar_t>
 __global__ void backward_kernel(
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> q,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> k,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> v,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> dq,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> dk,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> dv,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> grad_o,
-    torch::PackedTensorAccessor32<scalar_t, 4, torch::RestrictPtrTraits> o,
-    torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits> l,
+    const PackedAccessor<scalar_t, 4> q,
+    const PackedAccessor<scalar_t, 4> k,
+    const PackedAccessor<scalar_t, 4> v,
+          PackedAccessor<scalar_t, 4> dq,
+          PackedAccessor<scalar_t, 4> dk,
+          PackedAccessor<scalar_t, 4> dv,
+    const PackedAccessor<scalar_t, 4> grad_o,
+    const PackedAccessor<scalar_t, 4> o,
+    const PackedAccessor<scalar_t, 3> l,
     float scale) {
 
 }
 
 // main c++ function
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_forward(torch::Tensor q, torch::Tensor k,  torch::Tensor v, float scale, int q_block_size, int k_block_size) {
+std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    float scale,
+    int q_block_size,
+    int k_block_size
+) {
     auto o = torch::zeros_like(q);
     auto l = torch::zeros_like(q).sum({-1,});
 
@@ -53,7 +67,17 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(torch::Tensor q, t
     return {o, l};
 }
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_backward(torch::Tensor grad_o, torch::Tensor o, torch::Tensor l, torch::Tensor q,  torch::Tensor k,  torch::Tensor v, float scale, int q_block_size, int k_block_size) {
+std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
+    torch::Tensor grad_o,
+    torch::Tensor o,
+    torch::Tensor l,
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    float scale,
+    int q_block_size,
+    int k_block_size
+) {
     auto dq = torch::zeros_like(q);
     auto dk = torch::zeros_like(k);
     auto dv = torch::zeros_like(v);
