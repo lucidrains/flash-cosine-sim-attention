@@ -8,7 +8,7 @@
 template <typename scalar_t, int dims>
 using PackedAccessor = torch::PackedTensorAccessor32<scalar_t, dims, torch::RestrictPtrTraits>;
 
-// cuda kernels
+// forward kernel
 
 template <typename scalar_t>
 __global__ void forward_kernel(
@@ -17,10 +17,35 @@ __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> v,
           PackedAccessor<scalar_t, 4> o,
           PackedAccessor<scalar_t, 3> l,
-    const float scale)
-{
+    const float scale,
+    const int q_block_size,
+    const int k_block_size
+) {
+    const int batch_idx = blockIdx.x;
+    const int head_idx = blockIdx.y;
 
+    const int q_seq_len = q.size(-2);
+    const int k_seq_len = k.size(-2);
+    const int dim = q.size(-1);
+
+    const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
+    const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
+
+    const int row_tile_idx = threadIdx.x;
+    const int col_tile_idx = threadIdx.y;
+
+    int col_tiles_offset, row_tiles_offset;
+
+    for (int i = 0; i < num_col_tiles; i++) {
+        col_tiles_offset = i * k_block_size;
+
+        for (int j = 0; j < num_row_tiles; j++) {
+            row_tiles_offset = j * q_block_size;
+        }
+    }
 }
+
+ // backward kernel
 
 template <typename scalar_t>
 __global__ void backward_kernel(
@@ -33,9 +58,32 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> grad_o,
     const PackedAccessor<scalar_t, 4> o,
     const PackedAccessor<scalar_t, 3> l,
-    const float scale)
-{
+    const float scale,
+    const int q_block_size,
+    const int k_block_size
+) {
+    const int batch_idx = blockIdx.x;
+    const int head_idx = blockIdx.y;
 
+    const int q_seq_len = q.size(-2);
+    const int k_seq_len = k.size(-2);
+    const int dim = q.size(-1);
+
+    const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
+    const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
+
+    const int row_tile_idx = threadIdx.x;
+    const int col_tile_idx = threadIdx.y;
+
+    int col_tiles_offset, row_tiles_offset;
+
+    for (int i = 0; i < num_col_tiles; i++) {
+        col_tiles_offset = i * k_block_size;
+
+        for (int j = 0; j < num_row_tiles; j++) {
+            row_tiles_offset = j * q_block_size;
+        }
+    }
 }
 
 // main c++ function
@@ -66,7 +114,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            scale);
+            scale,
+            q_block_size,
+            k_block_size
+        );
     }));
 
     cudaDeviceSynchronize();
@@ -119,7 +170,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             grad_o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            scale);
+            scale,
+            q_block_size,
+            k_block_size
+        );
     }));
 
     cudaDeviceSynchronize();
