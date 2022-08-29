@@ -18,6 +18,7 @@ __global__ void forward_kernel(
           PackedAccessor<scalar_t, 4> o,
           PackedAccessor<scalar_t, 3> l,
     const float scale,
+    const bool causal,
     const int q_block_size,
     const int k_block_size
 ) {
@@ -35,11 +36,19 @@ __global__ void forward_kernel(
     const int col_tile_idx = threadIdx.y;
 
     int col_tiles_offset, row_tiles_offset;
+    bool is_last_col_tile;
+
+    auto q_ = q[batch_idx][head_idx];
+    auto k_ = k[batch_idx][head_idx];
+    auto v_ = v[batch_idx][head_idx];
+    auto o_ = o[batch_idx][head_idx];
+    auto l_ = l[batch_idx][head_idx];
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
 
         for (int j = 0; j < num_row_tiles; j++) {
+            is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
         }
     }
@@ -59,6 +68,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> o,
     const PackedAccessor<scalar_t, 3> l,
     const float scale,
+    const bool causal,
     const int q_block_size,
     const int k_block_size
 ) {
@@ -75,13 +85,26 @@ __global__ void backward_kernel(
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
 
+    auto q_ = q[batch_idx][head_idx];
+    auto k_ = k[batch_idx][head_idx];
+    auto v_ = v[batch_idx][head_idx];
+    auto dq_ = dq[batch_idx][head_idx];
+    auto dk_ = dk[batch_idx][head_idx];
+    auto dv_ = dv[batch_idx][head_idx];
+    auto o_ = o[batch_idx][head_idx];
+    auto l_ = l[batch_idx][head_idx];
+    auto grad_o_ = grad_o[batch_idx][head_idx];
+
     int col_tiles_offset, row_tiles_offset;
+    bool is_last_col_tile;
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
 
         for (int j = 0; j < num_row_tiles; j++) {
+            is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
+
         }
     }
 }
@@ -93,6 +116,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor k,
     torch::Tensor v,
     float scale,
+    bool causal,
     int q_block_size,
     int k_block_size
 ) {
@@ -115,6 +139,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
+            causal,
             q_block_size,
             k_block_size
         );
@@ -144,6 +169,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor k,
     torch::Tensor v,
     float scale,
+    bool causal,
     int q_block_size,
     int k_block_size
 ) {
@@ -171,6 +197,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
+            causal,
             q_block_size,
             k_block_size
         );

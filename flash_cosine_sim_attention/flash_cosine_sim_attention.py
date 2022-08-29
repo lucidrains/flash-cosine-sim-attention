@@ -22,14 +22,16 @@ class FlashCosineSimAttention(Function):
         ctx,
         q, k, v,
         scale,
+        causal,
         q_block_size,
         k_block_size
     ):
-        o, l = forward(q, k, v, scale, q_block_size, k_block_size)
+        o, l = forward(q, k, v, scale, causal, q_block_size, k_block_size)
 
         ctx.save_for_backward(o, l, q, k, v)
 
         ctx.scale = scale
+        ctx.causal = causal
         ctx.q_block_size = q_block_size
         ctx.k_block_size = k_block_size
         return o
@@ -39,20 +41,22 @@ class FlashCosineSimAttention(Function):
         o, l, q, k, v = ctx.saved_tensors
 
         scale = ctx.scale
+        causal = ctx.causal
         q_block_size = ctx.q_block_size
         k_block_size = ctx.k_block_size
 
-        dq, dk, dv = backward(do, o, l, q, k, v, scale, q_block_size, k_block_size)
-        return dq, dk, dv, None, None, None
+        dq, dk, dv = backward(do, o, l, q, k, v, scale, causal, q_block_size, k_block_size)
+        return dq, dk, dv, None, None, None, None
 
 # wrapper function
 
 def flash_cosine_sim_attention(
     q, k, v,
     scale = 8,
+    causal = False,
     q_block_size = 32,
     k_block_size = 32
 ):
     q, k = map(l2norm, (q, k))
-    o = FlashCosineSimAttention.apply(q, k, v, scale, q_block_size, k_block_size)
+    o = FlashCosineSimAttention.apply(q, k, v, scale, causal, q_block_size, k_block_size)
     return o
