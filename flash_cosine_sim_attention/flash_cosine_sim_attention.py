@@ -11,6 +11,14 @@ except ImportError:
 
 # helper functions
 
+def exists(val):
+    return val is not None
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if callable(d) else d
+
 def l2norm(t):
     return F.normalize(t, dim = -1)
 
@@ -23,12 +31,15 @@ class FlashCosineSimAttention(Function):
         q, k, v,
         scale,
         causal,
+        mask,
         q_block_size,
         k_block_size
     ):
-        o, l = forward(q, k, v, scale, causal, q_block_size, k_block_size)
+        mask = default(mask, lambda: torch.ones(q.shape[0], q.shape[2], device = q.device, dtype = torch.bool))
 
-        ctx.save_for_backward(o, l, q, k, v)
+        o, l = forward(q, k, v, mask, scale, causal, q_block_size, k_block_size)
+
+        ctx.save_for_backward(o, l, q, k, v, mask)
 
         ctx.scale = scale
         ctx.causal = causal
@@ -38,15 +49,16 @@ class FlashCosineSimAttention(Function):
 
     @staticmethod
     def backward(ctx, do):
-        o, l, q, k, v = ctx.saved_tensors
+        o, l, q, k, v, mask = ctx.saved_tensors
 
         scale = ctx.scale
         causal = ctx.causal
         q_block_size = ctx.q_block_size
         k_block_size = ctx.k_block_size
 
-        dq, dk, dv = backward(do, o, l, q, k, v, scale, causal, q_block_size, k_block_size)
-        return dq, dk, dv, None, None, None, None
+
+        dq, dk, dv = backward(do, o, l, q, k, v, mask, scale, causal, q_block_size, k_block_size)
+        return dq, dk, dv, None, None, None, None, None
 
 # wrapper function
 
@@ -54,9 +66,10 @@ def flash_cosine_sim_attention(
     q, k, v,
     scale = 8,
     causal = False,
+    mask = None,
     q_block_size = 32,
     k_block_size = 32
 ):
     q, k = map(l2norm, (q, k))
-    o = FlashCosineSimAttention.apply(q, k, v, scale, causal, q_block_size, k_block_size)
+    o = FlashCosineSimAttention.apply(q, k, v, scale, causal, mask, q_block_size, k_block_size)
     return o

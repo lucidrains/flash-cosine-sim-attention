@@ -15,6 +15,7 @@ __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
+    const PackedAccessor<bool, 2> mask,
           PackedAccessor<scalar_t, 4> o,
           PackedAccessor<scalar_t, 3> l,
     const float scale,
@@ -61,6 +62,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
+    const PackedAccessor<bool, 2> mask,
           PackedAccessor<scalar_t, 4> dq,
           PackedAccessor<scalar_t, 4> dk,
           PackedAccessor<scalar_t, 4> dv,
@@ -104,7 +106,6 @@ __global__ void backward_kernel(
         for (int j = 0; j < num_row_tiles; j++) {
             is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
-
         }
     }
 }
@@ -115,6 +116,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
+    torch::Tensor mask,
     float scale,
     bool causal,
     int q_block_size,
@@ -136,6 +138,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
@@ -168,6 +171,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
+    torch::Tensor mask,
     float scale,
     bool causal,
     int q_block_size,
@@ -190,6 +194,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
             dq.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dk.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
