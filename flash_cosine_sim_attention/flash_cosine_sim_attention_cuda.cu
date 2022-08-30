@@ -47,13 +47,12 @@ __global__ void forward_kernel(
     // shared memory
 
     extern __shared__ float _shared_mem[];
-    float* shared_mem = (float*) _shared_mem;
 
-    float* sm_q_block = (float*) &shared_mem[q_block_size * k_dim];
-    float* sm_k_block = (float*) &sm_q_block[k_block_size * k_dim];
-    float* sm_v_block = (float*) &sm_k_block[k_block_size * v_dim];
-    float* sm_l_block = (float*) &sm_v_block[q_block_size];
-    float* sm_o_block = (float*) &sm_l_block[q_block_size * v_dim];
+    float* sm_q_block = (float*) &_shared_mem;
+    float* sm_k_block = (float*) &sm_q_block[q_block_size * k_dim];
+    float* sm_v_block = (float*) &sm_k_block[k_block_size * k_dim];
+    float* sm_l_block = (float*) &sm_v_block[k_block_size * v_dim];
+    float* sm_o_block = (float*) &sm_l_block[q_block_size];
 
     // some variable
 
@@ -76,7 +75,11 @@ __global__ void forward_kernel(
         }
 
         if (col_tile_idx == 0) {
-            sm_l_block[row_tile_idx] = 0;
+            sm_l_block[row_tile_idx] = 0.;
+
+            for (int d = 0; d < v_dim; d++) {
+                sm_o_block[(row_tile_idx * v_dim) + d] = 0.;
+            }
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
@@ -103,12 +106,25 @@ __global__ void forward_kernel(
 
             atomicAdd(&sm_l_block[row_tile_idx], tmp);
 
+            float exp_weighted_value;
+
+            for (int d = 0; d < v_dim; d++) {
+                exp_weighted_value = tmp * sm_v_block[(col_tile_idx * v_dim) + d];
+                atomicAdd(&sm_o_block[(row_tile_idx * v_dim) + d], exp_weighted_value);
+            }
         }
 
         __syncthreads();
 
+        float tmp_row_sum;
+
         if (col_tile_idx == 0) {
-            l_[row_tiles_offset + row_tile_idx] = sm_l_block[row_tile_idx];
+            tmp_row_sum = sm_l_block[row_tile_idx];
+            l_[row_tiles_offset + row_tile_idx] = tmp_row_sum;
+
+            for (int d = 0; d < v_dim; d++) {
+                o_[row_tiles_offset + row_tile_idx][d] = sm_o_block[(row_tile_idx * v_dim) + d] / tmp_row_sum;
+            }
         }
     }
 }
@@ -165,13 +181,12 @@ __global__ void backward_kernel(
     // shared memory
 
     extern __shared__ float _shared_mem[];
-    float* shared_mem = (float*) _shared_mem;
 
-    float* sm_q_block = (float*) &shared_mem[q_block_size * k_dim];
-    float* sm_k_block = (float*) &sm_q_block[k_block_size * k_dim];
-    float* sm_v_block = (float*) &sm_k_block[k_block_size * v_dim];
-    float* sm_l_block = (float*) &sm_v_block[q_block_size];
-    float* sm_o_block = (float*) &sm_l_block[q_block_size * v_dim];
+    float* sm_q_block = (float*) &_shared_mem;
+    float* sm_k_block = (float*) &sm_q_block[q_block_size * k_dim];
+    float* sm_v_block = (float*) &sm_k_block[k_block_size * k_dim];
+    float* sm_l_block = (float*) &sm_v_block[k_block_size * v_dim];
+    float* sm_o_block = (float*) &sm_l_block[q_block_size];
 
     // loop
 
