@@ -26,9 +26,9 @@ __global__ void forward_kernel(
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
 
-    const int q_seq_len = q.size(-2);
-    const int k_seq_len = k.size(-2);
-    const int dim = q.size(-1);
+    const int q_seq_len = q.size(2);
+    const int k_seq_len = k.size(2);
+    const int feat_dim = q.size(3);
 
     const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
     const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
@@ -36,21 +36,42 @@ __global__ void forward_kernel(
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
 
-    int col_tiles_offset, row_tiles_offset;
-    bool is_last_col_tile;
-
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
     auto v_ = v[batch_idx][head_idx];
     auto o_ = o[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
+    auto mask_ = mask[batch_idx];
+
+    // shared memory
+
+    extern __shared__ float attn[];
+
+    // some variable
+
+    int col_tiles_offset, row_tiles_offset;
+    bool is_last_col_tile;
+
+    // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
-
         for (int j = 0; j < num_row_tiles; j++) {
             is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
+
+            float tmp = 0;
+            for (int d = 0; d < feat_dim; d++) {
+                tmp += q_[row_tiles_offset + row_tile_idx][d] * k_[col_tiles_offset + col_tile_idx][d];
+            }
+
+            tmp = __expf(tmp);
+            tmp *= scale;
+            tmp -= scale;
+
+            attn[row_tile_idx * q_block_size + col_tile_idx] = tmp;
+
+            __syncthreads();
         }
     }
 }
@@ -77,9 +98,9 @@ __global__ void backward_kernel(
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
 
-    const int q_seq_len = q.size(-2);
-    const int k_seq_len = k.size(-2);
-    const int dim = q.size(-1);
+    const int q_seq_len = q.size(2);
+    const int k_seq_len = k.size(2);
+    const int feat_dim = q.size(3);
 
     const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
     const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
@@ -96,9 +117,18 @@ __global__ void backward_kernel(
     auto o_ = o[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto grad_o_ = grad_o[batch_idx][head_idx];
+    auto mask_ = mask[batch_idx];
+
+    // some variables
 
     int col_tiles_offset, row_tiles_offset;
     bool is_last_col_tile;
+
+    // shared memory
+
+    extern __shared__ float attn[];
+
+    // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
@@ -106,6 +136,19 @@ __global__ void backward_kernel(
         for (int j = 0; j < num_row_tiles; j++) {
             is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
+
+            float tmp = 0;
+            for (int d = 0; d < feat_dim; d++) {
+                tmp += q_[row_tiles_offset + row_tile_idx][d] * k_[col_tiles_offset + col_tile_idx][d];
+            }
+
+            tmp = __expf(tmp);
+            tmp *= scale;
+            tmp -= scale;
+
+            attn[row_tile_idx * q_block_size + col_tile_idx] = tmp;
+
+            __syncthreads();
         }
     }
 }
@@ -132,9 +175,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
+    const int shared_mem_size = q_block_size * k_block_size * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
-        forward_kernel<scalar_t><<<blocks, threads_per_block>>>(
+        forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
@@ -188,9 +232,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
+    const int shared_mem_size = q_block_size * k_block_size * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
-        backward_kernel<scalar_t><<<blocks, threads_per_block>>>(
+        backward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
