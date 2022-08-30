@@ -64,13 +64,30 @@ __global__ void forward_kernel(
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
+
+        if (col_tile_idx == 0) {
+            for (int d = 0; d < k_dim; d++) {
+                sm_k_block[col_tiles_offset + (col_tile_idx * k_dim) + d] = k_[col_tiles_offset + col_tile_idx][d];
+            }
+
+            for (int d = 0; d < v_dim; d++) {
+                sm_v_block[col_tiles_offset + (col_tile_idx * v_dim) + d] = v_[col_tiles_offset + col_tile_idx][d];
+            }
+        }
+
         for (int j = 0; j < num_row_tiles; j++) {
             is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
 
+            if (row_tile_idx == 0) {
+                for (int d = 0; d < k_dim; d++) {
+                    sm_q_block[row_tiles_offset + (row_tile_idx * k_dim) + d] = q_[row_tiles_offset + row_tile_idx][d];
+                }
+            }
+
             float tmp = 0;
-            for (int d = 0; d < v_dim; d++) {
-                tmp += q_[row_tiles_offset + row_tile_idx][d] * k_[col_tiles_offset + col_tile_idx][d];
+            for (int d = 0; d < k_dim; d++) {
+                tmp += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
             }
 
             tmp = __expf(tmp);
@@ -147,9 +164,25 @@ __global__ void backward_kernel(
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
 
+        if (col_tile_idx == 0) {
+            for (int d = 0; d < k_dim; d++) {
+                sm_k_block[col_tiles_offset + (col_tile_idx * k_dim) + d] = k_[col_tiles_offset + col_tile_idx][d];
+            }
+
+            for (int d = 0; d < v_dim; d++) {
+                sm_v_block[col_tiles_offset + (col_tile_idx * v_dim) + d] = v_[col_tiles_offset + col_tile_idx][d];
+            }
+        }
+
         for (int j = 0; j < num_row_tiles; j++) {
             is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
+
+            if (row_tile_idx == 0) {
+                for (int d = 0; d < k_dim; d++) {
+                    sm_q_block[row_tiles_offset + (row_tile_idx * k_dim) + d] = q_[row_tiles_offset + row_tile_idx][d];
+                }
+            }
 
             float tmp = 0;
             for (int d = 0; d < v_dim; d++) {
