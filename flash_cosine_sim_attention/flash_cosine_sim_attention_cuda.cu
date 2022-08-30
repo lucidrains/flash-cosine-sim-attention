@@ -28,7 +28,8 @@ __global__ void forward_kernel(
 
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
-    const int feat_dim = q.size(3);
+    const int k_dim = k.size(3);
+    const int v_dim = v.size(3);
 
     const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
     const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
@@ -45,7 +46,12 @@ __global__ void forward_kernel(
 
     // shared memory
 
-    extern __shared__ float attn[];
+    extern __shared__ float _shared_mem[];
+    float* shared_mem = (float*) _shared_mem;
+
+    float* sm_q_blocks = (float*) &shared_mem[q_block_size * k_dim];
+    float* sm_k_blocks = (float*) &sm_q_blocks[k_block_size * k_dim];
+    float* sm_v_blocks = (float*) &sm_k_blocks[k_block_size * v_dim];
 
     // some variable
 
@@ -61,15 +67,13 @@ __global__ void forward_kernel(
             row_tiles_offset = j * q_block_size;
 
             float tmp = 0;
-            for (int d = 0; d < feat_dim; d++) {
+            for (int d = 0; d < v_dim; d++) {
                 tmp += q_[row_tiles_offset + row_tile_idx][d] * k_[col_tiles_offset + col_tile_idx][d];
             }
 
             tmp = __expf(tmp);
             tmp *= scale;
             tmp -= scale;
-
-            attn[row_tile_idx * q_block_size + col_tile_idx] = tmp;
 
             __syncthreads();
         }
@@ -100,7 +104,8 @@ __global__ void backward_kernel(
 
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
-    const int feat_dim = q.size(3);
+    const int k_dim = k.size(3);
+    const int v_dim = v.size(3);
 
     const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
     const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
@@ -126,7 +131,12 @@ __global__ void backward_kernel(
 
     // shared memory
 
-    extern __shared__ float attn[];
+    extern __shared__ float _shared_mem[];
+    float* shared_mem = (float*) _shared_mem;
+
+    float* sm_q_blocks = (float*) &shared_mem[q_block_size * k_dim];
+    float* sm_k_blocks = (float*) &sm_q_blocks[k_block_size * k_dim];
+    float* sm_v_blocks = (float*) &sm_k_blocks[k_block_size * v_dim];
 
     // loop
 
@@ -138,15 +148,13 @@ __global__ void backward_kernel(
             row_tiles_offset = j * q_block_size;
 
             float tmp = 0;
-            for (int d = 0; d < feat_dim; d++) {
+            for (int d = 0; d < v_dim; d++) {
                 tmp += q_[row_tiles_offset + row_tile_idx][d] * k_[col_tiles_offset + col_tile_idx][d];
             }
 
             tmp = __expf(tmp);
             tmp *= scale;
             tmp -= scale;
-
-            attn[row_tile_idx * q_block_size + col_tile_idx] = tmp;
 
             __syncthreads();
         }
@@ -159,23 +167,24 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
+    torch::Tensor o,
+    torch::Tensor l,
     torch::Tensor mask,
     float scale,
     bool causal,
     int q_block_size,
     int k_block_size
 ) {
-    auto o = torch::zeros_like(q);
     const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
-
-    auto l = torch::zeros_like(q).sum({-1,});
 
     const int batch = q.size(0);
     const int heads = q.size(1);
+    const int k_dim = k.size(3);
+    const int v_dim = v.size(3);
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
-    const int shared_mem_size = q_block_size * k_block_size * sizeof(float);
+    const unsigned shared_mem_size = ((q_block_size + k_block_size) * k_dim + k_block_size * v_dim) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
@@ -229,10 +238,12 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const int batch = dq.size(0);
     const int heads = dq.size(1);
+    const int k_dim = k.size(3);
+    const int v_dim = v.size(3);
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
-    const int shared_mem_size = q_block_size * k_block_size * sizeof(float);
+    const unsigned shared_mem_size = ((q_block_size + k_block_size) * k_dim + k_block_size * v_dim) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
         backward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(

@@ -35,9 +35,14 @@ class FlashCosineSimAttention(Function):
         q_block_size,
         k_block_size
     ):
+        batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
+
         mask = default(mask, lambda: torch.ones(q.shape[0], q.shape[2], device = q.device, dtype = torch.bool))
 
-        o, l = forward(q, k, v, mask, scale, causal, q_block_size, k_block_size)
+        o = torch.zeros((batch, heads, seq, dim), device = device, dtype = torch.float32)
+        l = torch.zeros((batch, heads, seq), device = device, dtype = torch.float32)
+
+        forward(q, k, v, o, l, mask, scale, causal, q_block_size, k_block_size)
 
         ctx.save_for_backward(o, l, q, k, v, mask)
 
@@ -55,7 +60,6 @@ class FlashCosineSimAttention(Function):
         causal = ctx.causal
         q_block_size = ctx.q_block_size
         k_block_size = ctx.k_block_size
-
 
         dq, dk, dv = backward(do, o, l, q, k, v, mask, scale, causal, q_block_size, k_block_size)
         return dq, dk, dv, None, None, None, None, None
