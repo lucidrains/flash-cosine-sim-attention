@@ -57,7 +57,6 @@ __global__ void forward_kernel(
     // some variable
 
     int col_tiles_offset, row_tiles_offset;
-    bool is_last_col_tile;
 
     // loop
 
@@ -83,7 +82,6 @@ __global__ void forward_kernel(
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
-            is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
 
             if (col_tile_idx == 0) {
@@ -126,6 +124,8 @@ __global__ void forward_kernel(
                 o_[row_tiles_offset + row_tile_idx][d] = sm_o_block[(row_tile_idx * v_dim) + d] / tmp_row_sum;
             }
         }
+
+        __syncthreads();
     }
 }
 
