@@ -3,6 +3,10 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
+// constants
+
+__constant__ float EPS = 1e-10;
+
 // type alias
 
 template <typename scalar_t, int dims>
@@ -57,75 +61,83 @@ __global__ void forward_kernel(
     // some variable
 
     int col_tiles_offset, row_tiles_offset;
+    int global_col, global_row;
+    bool should_calculate_attn, should_calculate_row, should_calculate_col;
 
     // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
+        global_col = col_tiles_offset + col_tile_idx;
+        should_calculate_col = global_col < k_seq_len;
 
-        if (row_tile_idx == 0) {
+        if (row_tile_idx == 0 && should_calculate_col) {
             for (int d = 0; d < k_dim; d++) {
-                sm_k_block[(col_tile_idx * k_dim) + d] = k_[col_tiles_offset + col_tile_idx][d];
+                sm_k_block[(col_tile_idx * k_dim) + d] = k_[global_col][d];
             }
 
             for (int d = 0; d < v_dim; d++) {
-                sm_v_block[(col_tile_idx * v_dim) + d] = v_[col_tiles_offset + col_tile_idx][d];
-            }
-        }
-
-        if (col_tile_idx == 0) {
-            sm_l_block[row_tile_idx] = 0.;
-
-            for (int d = 0; d < v_dim; d++) {
-                sm_o_block[(row_tile_idx * v_dim) + d] = 0.;
+                sm_v_block[(col_tile_idx * v_dim) + d] = v_[global_col][d];
             }
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
             row_tiles_offset = j * q_block_size;
+            global_row = row_tiles_offset + row_tile_idx;
+            should_calculate_row = global_row < q_seq_len;
 
-            if (col_tile_idx == 0) {
+            should_calculate_attn = should_calculate_row && should_calculate_col && (!causal || (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
+
+            if (col_tile_idx == 0 && should_calculate_row) {
                 for (int d = 0; d < k_dim; d++) {
-                    sm_q_block[(row_tile_idx * k_dim) + d] = q_[row_tiles_offset + row_tile_idx][d];
+                    sm_q_block[(row_tile_idx * k_dim) + d] = q_[global_row][d];
                 }
 
+                sm_l_block[row_tile_idx] = 0.;
+
+                for (int d = 0; d < v_dim; d++) {
+                    sm_o_block[(row_tile_idx * v_dim) + d] = 0.;
+                }
             }
 
             __syncthreads();
 
-            float tmp = 0;
-            for (int d = 0; d < k_dim; d++) {
-                tmp += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
+            if (should_calculate_attn) {
+                float tmp = 0;
+                for (int d = 0; d < k_dim; d++) {
+                    tmp += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
+                }
+
+                tmp *= scale;
+                tmp -= scale;
+                tmp = __expf(tmp);
+
+                atomicAdd(&sm_l_block[row_tile_idx], tmp);
+
+                float exp_weighted_value;
+
+                for (int d = 0; d < v_dim; d++) {
+                    exp_weighted_value = tmp * sm_v_block[(col_tile_idx * v_dim) + d];
+                    atomicAdd(&sm_o_block[(row_tile_idx * v_dim) + d], exp_weighted_value);
+                }
             }
 
-            tmp *= scale;
-            tmp -= scale;
-            tmp = __expf(tmp);
+            __syncthreads();
 
-            atomicAdd(&sm_l_block[row_tile_idx], tmp);
+            float tmp_row_sum;
 
-            float exp_weighted_value;
+            if (col_tile_idx == 0 && should_calculate_row) {
+                tmp_row_sum = sm_l_block[row_tile_idx];
 
-            for (int d = 0; d < v_dim; d++) {
-                exp_weighted_value = tmp * sm_v_block[(col_tile_idx * v_dim) + d];
-                atomicAdd(&sm_o_block[(row_tile_idx * v_dim) + d], exp_weighted_value);
+                l_[global_row] = tmp_row_sum;
+
+                for (int d = 0; d < v_dim; d++) {
+                    o_[global_row][d] = sm_o_block[(row_tile_idx * v_dim) + d] / max(tmp_row_sum, EPS);
+                }
             }
+
+            __syncthreads();
         }
-
-        __syncthreads();
-
-        float tmp_row_sum;
-
-        if (col_tile_idx == 0) {
-            tmp_row_sum = sm_l_block[row_tile_idx];
-            l_[row_tiles_offset + row_tile_idx] = tmp_row_sum;
-
-            for (int d = 0; d < v_dim; d++) {
-                o_[row_tiles_offset + row_tile_idx][d] = sm_o_block[(row_tile_idx * v_dim) + d] / tmp_row_sum;
-            }
-        }
-
-        __syncthreads();
     }
 }
 
