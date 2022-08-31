@@ -161,7 +161,7 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dq,
           PackedAccessor<scalar_t, 4> dk,
           PackedAccessor<scalar_t, 4> dv,
-    const PackedAccessor<scalar_t, 4> grad_o,
+    const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
     const PackedAccessor<scalar_t, 3> l,
     const float scale,
@@ -191,7 +191,7 @@ __global__ void backward_kernel(
     auto dv_ = dv[batch_idx][head_idx];
     auto o_ = o[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
-    auto grad_o_ = grad_o[batch_idx][head_idx];
+    auto do_ = d_out[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
 
     // some variables
@@ -209,6 +209,7 @@ __global__ void backward_kernel(
     float* sm_v = (float*) &sm_k[k_block_size * k_dim];
     float* sm_l = (float*) &sm_v[k_block_size * v_dim];
     float* sm_o = (float*) &sm_l[q_block_size];
+    float* sm_do = (float*) &sm_l[q_block_size * v_dim];
 
     float* sm_dq = (float*) &sm_o[q_block_size * v_dim];
     float* sm_dk = (float*) &sm_dq[q_block_size * k_dim];
@@ -246,6 +247,10 @@ __global__ void backward_kernel(
                     sm_dq[(row_tile_idx * k_dim) + d] = 0.;
                 }
 
+                for (int d = 0; d < v_dim; d++) {
+                    sm_do[(row_tile_idx * v_dim) + d] = do_[global_row][d];
+                }
+
                 sm_l[row_tile_idx] = l_[global_row];
             }
 
@@ -265,6 +270,69 @@ __global__ void backward_kernel(
             }
 
             __syncthreads();
+
+            float dp = 0;
+
+            if (should_calculate_attn) {
+                for (int d = 0; d < v_dim; d++) {
+                    // naively accumulate dv in shared mem
+
+                    atomicAdd(&sm_dv[(col_tile_idx * v_dim) + d], sm_do[(row_tile_idx * v_dim) + d] * attn);
+
+                    // calculate dp
+                    dp += sm_do[(row_tile_idx * v_dim) + d] * sm_v[(col_tile_idx * v_dim) + d];
+                }
+            }
+
+            // naively calculate D = rowsum(DO * O)
+
+            float D = 0;
+
+            if (should_calculate_row) {
+                for (int d = 0; d < v_dim; d++) {
+                    D += sm_do[(row_tile_idx * v_dim) + d] * sm_o[(row_tile_idx * v_dim) + d];
+                }
+            }
+
+            // calculate dS
+
+            float dS = 0;
+
+            if (should_calculate_attn) {
+                dS = attn * (dp - D) * scale;
+            }
+
+            // calculate dq and dk and write to shared memoery
+
+            if (should_calculate_attn) {
+                for (int d = 0; d < k_dim; d++) {
+                    atomicAdd(&sm_dq[(row_tile_idx * k_dim) + d], dS * sm_k[(col_tile_idx * k_dim) + d]);
+
+                    atomicAdd(&sm_dk[(col_tile_idx * k_dim) + d], dS * sm_q[(row_tile_idx * k_dim) + d]);
+                }
+            }
+
+            // write dq out to hbm
+
+            if (col_tile_idx == 0 && should_calculate_row) {
+                for (int d = 0; d < k_dim; d++) {
+                    dq_[global_row][d] = sm_dq[(row_tile_idx * k_dim) + d];
+                }
+            }
+        }
+
+        __syncthreads();
+
+        // write dk and dv out to hbm
+
+        if (row_tile_idx == 0 && should_calculate_col) {
+            for (int d = 0; d < k_dim; d++) {
+                dk_[global_col][d] = sm_dk[(col_tile_idx * k_dim) + d];
+            }
+
+            for (int d = 0; d < v_dim; d++) {
+                dv_[global_col][d] = sm_dv[(col_tile_idx * v_dim) + d];
+            }
         }
     }
 }
@@ -330,7 +398,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
 }
 
 std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
-    torch::Tensor grad_o,
+    torch::Tensor d_out,
     torch::Tensor o,
     torch::Tensor l,
     torch::Tensor q,
@@ -370,7 +438,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             dq.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dk.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            grad_o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
