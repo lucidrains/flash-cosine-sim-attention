@@ -61,11 +61,11 @@ __global__ void forward_kernel(
 
     extern __shared__ float _shared_mem[];
 
-    float* sm_q_block = (float*) &_shared_mem;
-    float* sm_k_block = (float*) &sm_q_block[q_block_size * k_dim];
-    float* sm_v_block = (float*) &sm_k_block[k_block_size * k_dim];
-    float* sm_l_block = (float*) &sm_v_block[k_block_size * v_dim];
-    float* sm_o_block = (float*) &sm_l_block[q_block_size];
+    float* sm_q = (float*) &_shared_mem;
+    float* sm_k = (float*) &sm_q[q_block_size * k_dim];
+    float* sm_v = (float*) &sm_k[k_block_size * k_dim];
+    float* sm_l = (float*) &sm_v[k_block_size * v_dim];
+    float* sm_o = (float*) &sm_l[q_block_size];
 
     // some variable
 
@@ -82,11 +82,11 @@ __global__ void forward_kernel(
 
         if (row_tile_idx == 0 && should_calculate_col) {
             for (int d = 0; d < k_dim; d++) {
-                sm_k_block[(col_tile_idx * k_dim) + d] = k_[global_col][d];
+                sm_k[(col_tile_idx * k_dim) + d] = k_[global_col][d];
             }
 
             for (int d = 0; d < v_dim; d++) {
-                sm_v_block[(col_tile_idx * v_dim) + d] = v_[global_col][d];
+                sm_v[(col_tile_idx * v_dim) + d] = v_[global_col][d];
             }
         }
 
@@ -99,13 +99,13 @@ __global__ void forward_kernel(
 
             if (col_tile_idx == 0 && should_calculate_row) {
                 for (int d = 0; d < k_dim; d++) {
-                    sm_q_block[(row_tile_idx * k_dim) + d] = q_[global_row][d];
+                    sm_q[(row_tile_idx * k_dim) + d] = q_[global_row][d];
                 }
 
-                sm_l_block[row_tile_idx] = 0.;
+                sm_l[row_tile_idx] = 0.;
 
                 for (int d = 0; d < v_dim; d++) {
-                    sm_o_block[(row_tile_idx * v_dim) + d] = 0.;
+                    sm_o[(row_tile_idx * v_dim) + d] = 0.;
                 }
             }
 
@@ -114,20 +114,20 @@ __global__ void forward_kernel(
             if (should_calculate_attn) {
                 float attn = 0;
                 for (int d = 0; d < k_dim; d++) {
-                    attn += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
+                    attn += sm_q[(row_tile_idx * k_dim) + d] * sm_k[(col_tile_idx * k_dim) + d];
                 }
 
                 attn *= scale;
                 attn -= scale;
                 attn = __expf(attn);
 
-                atomicAdd(&sm_l_block[row_tile_idx], attn);
+                atomicAdd(&sm_l[row_tile_idx], attn);
 
                 float exp_weighted_value;
 
                 for (int d = 0; d < v_dim; d++) {
-                    exp_weighted_value = attn * sm_v_block[(col_tile_idx * v_dim) + d];
-                    atomicAdd(&sm_o_block[(row_tile_idx * v_dim) + d], exp_weighted_value);
+                    exp_weighted_value = attn * sm_v[(col_tile_idx * v_dim) + d];
+                    atomicAdd(&sm_o[(row_tile_idx * v_dim) + d], exp_weighted_value);
                 }
             }
 
@@ -136,12 +136,12 @@ __global__ void forward_kernel(
             float tmp_row_sum;
 
             if (col_tile_idx == 0 && should_calculate_row) {
-                tmp_row_sum = sm_l_block[row_tile_idx];
+                tmp_row_sum = sm_l[row_tile_idx];
 
                 l_[global_row] = tmp_row_sum;
 
                 for (int d = 0; d < v_dim; d++) {
-                    o_[global_row][d] = sm_o_block[(row_tile_idx * v_dim) + d];
+                    o_[global_row][d] = sm_o[(row_tile_idx * v_dim) + d];
                 }
             }
 
@@ -204,15 +204,15 @@ __global__ void backward_kernel(
 
     extern __shared__ float _shared_mem[];
 
-    float* sm_q_block = (float*) &_shared_mem;
-    float* sm_k_block = (float*) &sm_q_block[q_block_size * k_dim];
-    float* sm_v_block = (float*) &sm_k_block[k_block_size * k_dim];
-    float* sm_l_block = (float*) &sm_v_block[k_block_size * v_dim];
-    float* sm_o_block = (float*) &sm_l_block[q_block_size];
+    float* sm_q = (float*) &_shared_mem;
+    float* sm_k = (float*) &sm_q[q_block_size * k_dim];
+    float* sm_v = (float*) &sm_k[k_block_size * k_dim];
+    float* sm_l = (float*) &sm_v[k_block_size * v_dim];
+    float* sm_o = (float*) &sm_l[q_block_size];
 
-    float* sm_dq_block = (float*) &sm_o_block[q_block_size * v_dim];
-    float* sm_dk_block = (float*) &sm_dq_block[q_block_size * k_dim];
-    float* sm_dv_block = (float*) &sm_dk_block[k_block_size * k_dim];
+    float* sm_dq = (float*) &sm_o[q_block_size * v_dim];
+    float* sm_dk = (float*) &sm_dq[q_block_size * k_dim];
+    float* sm_dv = (float*) &sm_dk[k_block_size * k_dim];
 
     // loop
 
@@ -223,13 +223,13 @@ __global__ void backward_kernel(
 
         if (row_tile_idx == 0) {
             for (int d = 0; d < k_dim; d++) {
-                sm_k_block[(col_tile_idx * k_dim) + d] = k_[global_col][d];
-                sm_dk_block[(col_tile_idx * k_dim) + d] = 0.;
+                sm_k[(col_tile_idx * k_dim) + d] = k_[global_col][d];
+                sm_dk[(col_tile_idx * k_dim) + d] = 0.;
             }
 
             for (int d = 0; d < v_dim; d++) {
-                sm_v_block[(col_tile_idx * v_dim) + d] = v_[global_col][d];
-                sm_dv_block[(col_tile_idx * k_dim) + d] = 0.;
+                sm_v[(col_tile_idx * v_dim) + d] = v_[global_col][d];
+                sm_dv[(col_tile_idx * k_dim) + d] = 0.;
             }
         }
 
@@ -242,11 +242,11 @@ __global__ void backward_kernel(
 
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {
-                    sm_q_block[(row_tile_idx * k_dim) + d] = q_[global_row][d];
-                    sm_dq_block[(row_tile_idx * k_dim) + d] = 0.;
+                    sm_q[(row_tile_idx * k_dim) + d] = q_[global_row][d];
+                    sm_dq[(row_tile_idx * k_dim) + d] = 0.;
                 }
 
-                sm_l_block[row_tile_idx] = l_[global_row];
+                sm_l[row_tile_idx] = l_[global_row];
             }
 
             __syncthreads();
@@ -255,13 +255,13 @@ __global__ void backward_kernel(
 
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
-                    attn += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
+                    attn += sm_q[(row_tile_idx * k_dim) + d] * sm_k[(col_tile_idx * k_dim) + d];
                 }
 
                 attn *= scale;
                 attn -= scale;
                 attn = __expf(attn);
-                attn /= max(sm_l_block[row_tile_idx], 1e-10);
+                attn /= max(sm_l[row_tile_idx], 1e-10);
             }
 
             __syncthreads();
