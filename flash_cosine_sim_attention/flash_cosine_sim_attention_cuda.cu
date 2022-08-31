@@ -210,6 +210,10 @@ __global__ void backward_kernel(
     float* sm_l_block = (float*) &sm_v_block[k_block_size * v_dim];
     float* sm_o_block = (float*) &sm_l_block[q_block_size];
 
+    float* sm_dq_block = (float*) &sm_o_block[q_block_size * v_dim];
+    float* sm_dk_block = (float*) &sm_dq_block[q_block_size * k_dim];
+    float* sm_dv_block = (float*) &sm_dk_block[k_block_size * k_dim];
+
     // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
@@ -220,10 +224,12 @@ __global__ void backward_kernel(
         if (row_tile_idx == 0) {
             for (int d = 0; d < k_dim; d++) {
                 sm_k_block[(col_tile_idx * k_dim) + d] = k_[global_col][d];
+                sm_dk_block[(col_tile_idx * k_dim) + d] = 0.;
             }
 
             for (int d = 0; d < v_dim; d++) {
                 sm_v_block[(col_tile_idx * v_dim) + d] = v_[global_col][d];
+                sm_dv_block[(col_tile_idx * k_dim) + d] = 0.;
             }
         }
 
@@ -237,6 +243,7 @@ __global__ void backward_kernel(
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {
                     sm_q_block[(row_tile_idx * k_dim) + d] = q_[global_row][d];
+                    sm_dq_block[(row_tile_idx * k_dim) + d] = 0.;
                 }
 
                 sm_l_block[row_tile_idx] = l_[global_row];
@@ -285,7 +292,11 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = ((q_block_size + k_block_size) * k_dim + k_block_size * v_dim + q_block_size + q_block_size * v_dim) * sizeof(float);
+    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim +
+                                        k_block_size * v_dim +
+                                        q_block_size +
+                                        q_block_size * v_dim
+                                      ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
@@ -344,7 +355,11 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = ((q_block_size + k_block_size) * k_dim + k_block_size * v_dim + q_block_size + q_block_size * v_dim) * sizeof(float);
+    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim * 2 +
+                                        k_block_size * v_dim +
+                                        q_block_size +
+                                        q_block_size * v_dim * 2
+                                      ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
         backward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
