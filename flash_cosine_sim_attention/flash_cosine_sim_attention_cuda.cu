@@ -3,10 +3,6 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
-// constants
-
-__constant__ float EPS = 1e-10;
-
 // type alias
 
 template <typename scalar_t, int dims>
