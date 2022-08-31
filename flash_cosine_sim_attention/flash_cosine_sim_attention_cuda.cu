@@ -261,7 +261,7 @@ __global__ void backward_kernel(
                 attn *= scale;
                 attn -= scale;
                 attn = __expf(attn);
-                attn /= sm_l_block[row_tile_idx];
+                attn /= max(sm_l_block[row_tile_idx], 1e-10);
             }
 
             __syncthreads();
