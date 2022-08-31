@@ -132,7 +132,7 @@ __global__ void forward_kernel(
                 l_[global_row] = tmp_row_sum;
 
                 for (int d = 0; d < v_dim; d++) {
-                    o_[global_row][d] = sm_o_block[(row_tile_idx * v_dim) + d] / max(tmp_row_sum, EPS);
+                    o_[global_row][d] = sm_o_block[(row_tile_idx * v_dim) + d];
                 }
             }
 

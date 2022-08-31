@@ -44,6 +44,8 @@ class FlashCosineSimAttention(Function):
 
         forward(q, k, v, o, l, mask, scale, causal, q_block_size, k_block_size)
 
+        o.div_(l[..., None].clamp(min = 1e-20))
+
         ctx.save_for_backward(o, l, q, k, v, mask)
 
         ctx.scale = scale
