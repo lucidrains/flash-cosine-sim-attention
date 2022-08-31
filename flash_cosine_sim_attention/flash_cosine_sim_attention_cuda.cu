@@ -100,7 +100,10 @@ __global__ void forward_kernel(
             global_row = row_tiles_offset + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
-            should_calculate_attn = should_calculate_row && should_calculate_col && (!causal || (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
+            should_calculate_attn = should_calculate_row &&
+                                    should_calculate_col &&
+                                    ( !causal ||
+                                      (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
 
             if (col_tile_idx == 0 && should_calculate_row) {
                 for (int d = 0; d < k_dim; d++) {
@@ -249,7 +252,10 @@ __global__ void backward_kernel(
             global_row = row_tiles_offset + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
-            should_calculate_attn = should_calculate_row && should_calculate_col && (!causal || (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
+            should_calculate_attn = should_calculate_row &&
+                                    should_calculate_col &&
+                                    ( !causal ||
+                                      (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
 
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {
