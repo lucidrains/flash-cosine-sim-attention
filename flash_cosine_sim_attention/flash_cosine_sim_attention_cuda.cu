@@ -50,6 +50,11 @@ __global__ void forward_kernel(
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
 
+    const int sm_q_offset = row_tile_idx * k_dim;
+    const int sm_k_offset = col_tile_idx * k_dim;
+    const int sm_v_offset = col_tile_idx * v_dim;
+    const int sm_o_offset = row_tile_idx * v_dim;
+
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
     auto v_ = v[batch_idx][head_idx];
@@ -82,11 +87,11 @@ __global__ void forward_kernel(
 
         if (row_tile_idx == 0 && should_calculate_col) {
             for (int d = 0; d < k_dim; d++) {
-                sm_k[(col_tile_idx * k_dim) + d] = k_[global_col][d];
+                sm_k[sm_k_offset + d] = k_[global_col][d];
             }
 
             for (int d = 0; d < v_dim; d++) {
-                sm_v[(col_tile_idx * v_dim) + d] = v_[global_col][d];
+                sm_v[sm_v_offset + d] = v_[global_col][d];
             }
         }
 
@@ -99,13 +104,13 @@ __global__ void forward_kernel(
 
             if (col_tile_idx == 0 && should_calculate_row) {
                 for (int d = 0; d < k_dim; d++) {
-                    sm_q[(row_tile_idx * k_dim) + d] = q_[global_row][d];
+                    sm_q[sm_q_offset + d] = q_[global_row][d];
                 }
 
                 sm_l[row_tile_idx] = 0.;
 
                 for (int d = 0; d < v_dim; d++) {
-                    sm_o[(row_tile_idx * v_dim) + d] = 0.;
+                    sm_o[sm_o_offset + d] = 0.;
                 }
             }
 
@@ -114,7 +119,7 @@ __global__ void forward_kernel(
             if (should_calculate_attn) {
                 float attn = 0;
                 for (int d = 0; d < k_dim; d++) {
-                    attn += sm_q[(row_tile_idx * k_dim) + d] * sm_k[(col_tile_idx * k_dim) + d];
+                    attn += sm_q[sm_q_offset + d] * sm_k[sm_k_offset + d];
                 }
 
                 attn *= scale;
@@ -126,8 +131,8 @@ __global__ void forward_kernel(
                 float exp_weighted_value;
 
                 for (int d = 0; d < v_dim; d++) {
-                    exp_weighted_value = attn * sm_v[(col_tile_idx * v_dim) + d];
-                    atomicAdd(&sm_o[(row_tile_idx * v_dim) + d], exp_weighted_value);
+                    exp_weighted_value = attn * sm_v[sm_v_offset + d];
+                    atomicAdd(&sm_o[sm_o_offset + d], exp_weighted_value);
                 }
             }
 
@@ -141,7 +146,7 @@ __global__ void forward_kernel(
                 l_[global_row] = tmp_row_sum;
 
                 for (int d = 0; d < v_dim; d++) {
-                    o_[global_row][d] = sm_o[(row_tile_idx * v_dim) + d];
+                    o_[global_row][d] = sm_o[sm_o_offset + d];
                 }
             }
 
@@ -182,6 +187,11 @@ __global__ void backward_kernel(
 
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
+
+    const int sm_q_offset = row_tile_idx * k_dim;
+    const int sm_k_offset = col_tile_idx * k_dim;
+    const int sm_v_offset = col_tile_idx * v_dim;
+    const int sm_o_offset = row_tile_idx * v_dim;
 
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
@@ -224,13 +234,13 @@ __global__ void backward_kernel(
 
         if (row_tile_idx == 0) {
             for (int d = 0; d < k_dim; d++) {
-                sm_k[(col_tile_idx * k_dim) + d] = k_[global_col][d];
-                sm_dk[(col_tile_idx * k_dim) + d] = 0.;
+                sm_k[sm_k_offset + d] = k_[global_col][d];
+                sm_dk[sm_k_offset + d] = 0.;
             }
 
             for (int d = 0; d < v_dim; d++) {
-                sm_v[(col_tile_idx * v_dim) + d] = v_[global_col][d];
-                sm_dv[(col_tile_idx * k_dim) + d] = 0.;
+                sm_v[sm_v_offset + d] = v_[global_col][d];
+                sm_dv[sm_v_offset + d] = 0.;
             }
         }
 
@@ -243,12 +253,12 @@ __global__ void backward_kernel(
 
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {
-                    sm_q[(row_tile_idx * k_dim) + d] = q_[global_row][d];
-                    sm_dq[(row_tile_idx * k_dim) + d] = 0.;
+                    sm_q[sm_q_offset + d] = q_[global_row][d];
+                    sm_dq[sm_q_offset + d] = 0.;
                 }
 
                 for (int d = 0; d < v_dim; d++) {
-                    sm_do[(row_tile_idx * v_dim) + d] = do_[global_row][d];
+                    sm_do[sm_o_offset + d] = do_[global_row][d];
                 }
 
                 sm_l[row_tile_idx] = l_[global_row];
@@ -260,7 +270,7 @@ __global__ void backward_kernel(
 
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
-                    attn += sm_q[(row_tile_idx * k_dim) + d] * sm_k[(col_tile_idx * k_dim) + d];
+                    attn += sm_q[sm_q_offset + d] * sm_k[sm_k_offset + d];
                 }
 
                 attn *= scale;
@@ -277,10 +287,10 @@ __global__ void backward_kernel(
                 for (int d = 0; d < v_dim; d++) {
                     // naively accumulate dv in shared mem
 
-                    atomicAdd(&sm_dv[(col_tile_idx * v_dim) + d], sm_do[(row_tile_idx * v_dim) + d] * attn);
+                    atomicAdd(&sm_dv[sm_v_offset + d], sm_do[sm_o_offset + d] * attn);
 
                     // calculate dp
-                    dp += sm_do[(row_tile_idx * v_dim) + d] * sm_v[(col_tile_idx * v_dim) + d];
+                    dp += sm_do[sm_o_offset + d] * sm_v[sm_v_offset + d];
                 }
             }
 
@@ -290,7 +300,7 @@ __global__ void backward_kernel(
 
             if (should_calculate_row) {
                 for (int d = 0; d < v_dim; d++) {
-                    D += sm_do[(row_tile_idx * v_dim) + d] * sm_o[(row_tile_idx * v_dim) + d];
+                    D += sm_do[sm_o_offset + d] * sm_o[sm_o_offset + d];
                 }
             }
 
@@ -306,9 +316,9 @@ __global__ void backward_kernel(
 
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
-                    atomicAdd(&sm_dq[(row_tile_idx * k_dim) + d], dS * sm_k[(col_tile_idx * k_dim) + d]);
+                    atomicAdd(&sm_dq[sm_q_offset + d], dS * sm_k[sm_k_offset + d]);
 
-                    atomicAdd(&sm_dk[(col_tile_idx * k_dim) + d], dS * sm_q[(row_tile_idx * k_dim) + d]);
+                    atomicAdd(&sm_dk[sm_k_offset + d], dS * sm_q[sm_q_offset + d]);
                 }
             }
 
@@ -316,7 +326,7 @@ __global__ void backward_kernel(
 
             if (col_tile_idx == 0 && should_calculate_row) {
                 for (int d = 0; d < k_dim; d++) {
-                    dq_[global_row][d] = sm_dq[(row_tile_idx * k_dim) + d];
+                    dq_[global_row][d] = sm_dq[sm_q_offset + d];
                 }
             }
         }
@@ -327,11 +337,11 @@ __global__ void backward_kernel(
 
         if (row_tile_idx == 0 && should_calculate_col) {
             for (int d = 0; d < k_dim; d++) {
-                dk_[global_col][d] = sm_dk[(col_tile_idx * k_dim) + d];
+                dk_[global_col][d] = sm_dk[sm_k_offset + d];
             }
 
             for (int d = 0; d < v_dim; d++) {
-                dv_[global_col][d] = sm_dv[(col_tile_idx * v_dim) + d];
+                dv_[global_col][d] = sm_dv[sm_v_offset + d];
             }
         }
     }
