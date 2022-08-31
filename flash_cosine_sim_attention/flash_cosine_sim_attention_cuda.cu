@@ -8,6 +8,19 @@
 template <typename scalar_t, int dims>
 using PackedAccessor = torch::PackedTensorAccessor32<scalar_t, dims, torch::RestrictPtrTraits>;
 
+// helper functions
+
+__device__ int cdiv(int numer, int denom) {
+    return (numer + denom - 1) / denom;
+}
+
+int next_pow_2(int n) {
+    int i = 1;
+    while(i < n)
+        i *= 2;
+    return i;
+}
+
 // forward kernel
 
 template <typename scalar_t>
@@ -31,8 +44,8 @@ __global__ void forward_kernel(
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
-    const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
+    const int num_col_tiles = cdiv(k_seq_len, k_block_size);
+    const int num_row_tiles = cdiv(q_seq_len, q_block_size);
 
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
@@ -164,8 +177,8 @@ __global__ void backward_kernel(
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const int num_col_tiles = (k_seq_len + k_block_size - 1) / k_block_size;
-    const int num_row_tiles = (q_seq_len + q_block_size - 1) / q_block_size;
+    const int num_col_tiles = cdiv(k_seq_len, k_block_size);
+    const int num_row_tiles = cdiv(q_seq_len, q_block_size);
 
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
