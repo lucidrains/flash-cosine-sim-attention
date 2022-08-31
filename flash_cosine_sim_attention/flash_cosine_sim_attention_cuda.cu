@@ -233,7 +233,7 @@ __global__ void backward_kernel(
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
         global_col = col_tiles_offset + col_tile_idx;
-        should_calculate_col = global_col < k_seq_len;
+        should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
         if (row_tile_idx == 0) {
             for (int d = 0; d < k_dim; d++) {
@@ -327,6 +327,8 @@ __global__ void backward_kernel(
                     atomicAdd(&sm_dk[sm_k_offset + d], dS * sm_q[sm_q_offset + d]);
                 }
             }
+
+            __syncthreads();
 
             // write dq out to hbm
 
