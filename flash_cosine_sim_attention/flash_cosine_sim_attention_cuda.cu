@@ -292,10 +292,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim +
-                                        k_block_size * v_dim +
-                                        q_block_size +
-                                        q_block_size * v_dim
+    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim +  // q, k
+                                        k_block_size * v_dim +                  // v
+                                        q_block_size * v_dim +                  // o
+                                        q_block_size                            // l
                                       ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
@@ -355,10 +355,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim * 2 +
-                                        k_block_size * v_dim +
-                                        q_block_size +
-                                        q_block_size * v_dim * 2
+    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim * 2 +   // q, k, dq, dk
+                                        k_block_size * v_dim * 2 +                   // v, dv
+                                        q_block_size * v_dim * 2 +                   // o, do
+                                        q_block_size                                 // l
                                       ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
