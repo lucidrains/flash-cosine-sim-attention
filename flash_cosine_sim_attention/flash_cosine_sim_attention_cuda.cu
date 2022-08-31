@@ -99,21 +99,21 @@ __global__ void forward_kernel(
             __syncthreads();
 
             if (should_calculate_attn) {
-                float tmp = 0;
+                float attn = 0;
                 for (int d = 0; d < k_dim; d++) {
-                    tmp += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
+                    attn += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
                 }
 
-                tmp *= scale;
-                tmp -= scale;
-                tmp = __expf(tmp);
+                attn *= scale;
+                attn -= scale;
+                attn = __expf(attn);
 
-                atomicAdd(&sm_l_block[row_tile_idx], tmp);
+                atomicAdd(&sm_l_block[row_tile_idx], attn);
 
                 float exp_weighted_value;
 
                 for (int d = 0; d < v_dim; d++) {
-                    exp_weighted_value = tmp * sm_v_block[(col_tile_idx * v_dim) + d];
+                    exp_weighted_value = attn * sm_v_block[(col_tile_idx * v_dim) + d];
                     atomicAdd(&sm_o_block[(row_tile_idx * v_dim) + d], exp_weighted_value);
                 }
             }
@@ -184,7 +184,8 @@ __global__ void backward_kernel(
     // some variables
 
     int col_tiles_offset, row_tiles_offset;
-    bool is_last_col_tile;
+    int global_col, global_row;
+    bool should_calculate_attn, should_calculate_row, should_calculate_col;
 
     // shared memory
 
@@ -200,37 +201,48 @@ __global__ void backward_kernel(
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
+        global_col = col_tiles_offset + col_tile_idx;
+        should_calculate_col = global_col < k_seq_len;
 
         if (row_tile_idx == 0) {
             for (int d = 0; d < k_dim; d++) {
-                sm_k_block[col_tiles_offset + (col_tile_idx * k_dim) + d] = k_[col_tiles_offset + col_tile_idx][d];
+                sm_k_block[(col_tile_idx * k_dim) + d] = k_[global_col][d];
             }
 
             for (int d = 0; d < v_dim; d++) {
-                sm_v_block[col_tiles_offset + (col_tile_idx * v_dim) + d] = v_[col_tiles_offset + col_tile_idx][d];
+                sm_v_block[(col_tile_idx * v_dim) + d] = v_[global_col][d];
             }
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
-            is_last_col_tile = (i == (num_col_tiles - 1));
             row_tiles_offset = j * q_block_size;
+            global_row = row_tiles_offset + row_tile_idx;
+            should_calculate_row = global_row < q_seq_len;
+
+            should_calculate_attn = should_calculate_row && should_calculate_col && (!causal || (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
 
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {
-                    sm_q_block[row_tiles_offset + (row_tile_idx * k_dim) + d] = q_[row_tiles_offset + row_tile_idx][d];
+                    sm_q_block[(row_tile_idx * k_dim) + d] = q_[global_row][d];
                 }
+
+                sm_l_block[row_tile_idx] = l_[global_row];
             }
 
             __syncthreads();
 
-            float tmp = 0;
-            for (int d = 0; d < k_dim; d++) {
-                tmp += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
-            }
+            float attn = 0;
 
-            tmp *= scale;
-            tmp -= scale;
-            tmp = __expf(tmp);
+            if (should_calculate_attn) {
+                for (int d = 0; d < k_dim; d++) {
+                    attn += sm_q_block[(row_tile_idx * k_dim) + d] * sm_k_block[(col_tile_idx * k_dim) + d];
+                }
+
+                attn *= scale;
+                attn -= scale;
+                attn = __expf(attn);
+                attn /= sm_l_block[row_tile_idx];
+            }
 
             __syncthreads();
         }
