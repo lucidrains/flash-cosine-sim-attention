@@ -110,10 +110,10 @@ __global__ void forward_kernel(
                     sm_q[sm_q_offset + d] = q_[global_row][d];
                 }
 
-                sm_l[row_tile_idx] = 0.;
+                sm_l[row_tile_idx] = l_[global_row];
 
                 for (int d = 0; d < v_dim; d++) {
-                    sm_o[sm_o_offset + d] = 0.;
+                    sm_o[sm_o_offset + d] = o_[global_row][d];
                 }
             }
 
@@ -260,7 +260,7 @@ __global__ void backward_kernel(
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {
                     sm_q[sm_q_offset + d] = q_[global_row][d];
-                    sm_dq[sm_q_offset + d] = 0.;
+                    sm_dq[sm_q_offset + d] = dq_[global_row][d];
                 }
 
                 for (int d = 0; d < v_dim; d++) {
