@@ -337,6 +337,8 @@ __global__ void backward_kernel(
                     dq_[global_row][d] = sm_dq[sm_q_offset + d];
                 }
             }
+
+            __syncthreads();
         }
 
         __syncthreads();
