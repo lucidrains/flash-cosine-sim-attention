@@ -103,7 +103,7 @@ __global__ void forward_kernel(
             should_calculate_attn = should_calculate_row &&
                                     should_calculate_col &&
                                     ( !causal ||
-                                      (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
+                                      (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
             if (col_tile_idx == 0 && should_calculate_row) {
                 for (int d = 0; d < k_dim; d++) {
@@ -255,7 +255,7 @@ __global__ void backward_kernel(
             should_calculate_attn = should_calculate_row &&
                                     should_calculate_col &&
                                     ( !causal ||
-                                      (causal && (global_row <= (global_col + k_seq_len - q_seq_len))));
+                                      (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
             if (col_tile_idx == 0) {
                 for (int d = 0; d < k_dim; d++) {

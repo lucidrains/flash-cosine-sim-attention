@@ -31,7 +31,7 @@ def plain_cosine_sim_attention(q, k, v, scale = 8, causal = False):
     sim = sim * scale
 
     if causal:
-        causal_mask = torch.ones(sim.shape[-2:], device = q.device).triu(1)
+        causal_mask = torch.ones(sim.shape[-2:], device = q.device, dtype = torch.bool).triu(1)
         sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
 
     attn = sim.softmax(dim = -1)
