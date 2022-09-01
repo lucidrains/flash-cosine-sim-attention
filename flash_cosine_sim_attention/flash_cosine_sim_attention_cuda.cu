@@ -274,6 +274,7 @@ __global__ void backward_kernel(
             __syncthreads();
 
             float attn = 0;
+            float dp = 0;
 
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
@@ -284,19 +285,14 @@ __global__ void backward_kernel(
                 attn -= scale;
                 attn = __expf(attn);
                 attn /= max(sm_l[row_tile_idx], 1e-10);
-            }
 
-            __syncthreads();
-
-            float dp = 0;
-
-            if (should_calculate_attn) {
                 for (int d = 0; d < v_dim; d++) {
                     // naively accumulate dv in shared mem
 
                     atomicAdd(&sm_dv[sm_v_offset + d], sm_do[sm_o_offset + d] * attn);
 
                     // calculate dp
+
                     dp += sm_do[sm_o_offset + d] * sm_v[sm_v_offset + d];
                 }
             }
@@ -355,6 +351,8 @@ __global__ void backward_kernel(
                 dv_[global_col][d] = sm_dv[sm_v_offset + d];
             }
         }
+
+        __syncthreads();
     }
 }
 
@@ -425,16 +423,15 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
+    torch::Tensor dq,
+    torch::Tensor dk,
+    torch::Tensor dv,
     torch::Tensor mask,
     float scale,
     bool causal,
     int q_block_size,
     int k_block_size
 ) {
-    auto dq = torch::zeros_like(q);
-    auto dk = torch::zeros_like(k);
-    auto dv = torch::zeros_like(v);
-
     const at::cuda::OptionalCUDAGuard device_guard(device_of(dq));
 
     const int batch = dq.size(0);

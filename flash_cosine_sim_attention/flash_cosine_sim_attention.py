@@ -78,7 +78,9 @@ class FlashCosineSimAttention(Function):
         q_block_size = ctx.q_block_size
         k_block_size = ctx.k_block_size
 
-        dq, dk, dv = backward(do, o, l, q, k, v, mask, scale, causal, q_block_size, k_block_size)
+        dq, dk, dv = map(torch.zeros_like, (q, k, v))
+
+        dq, dk, dv = backward(do, o, l, q, k, v, dq, dk, dv, mask, scale, causal, q_block_size, k_block_size)
         return dq, dk, dv, None, None, None, None, None
 
 # wrapper function
