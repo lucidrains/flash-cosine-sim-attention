@@ -25,14 +25,19 @@ def l2norm(t):
 
 # original cosine sim attention
 
-def plain_cosine_sim_attention(q, k, v, scale = 8, causal = False):
+def plain_cosine_sim_attention(q, k, v, scale = 8, causal = False, mask = None):
     q, k = map(l2norm, (q, k))
     sim = einsum('... i d, ... j d -> ... i j', q, k)
     sim = sim * scale
 
+    mask_value = -torch.finfo(sim.dtype).max
+
     if causal:
         causal_mask = torch.ones(sim.shape[-2:], device = q.device, dtype = torch.bool).triu(1)
-        sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
+        sim = sim.masked_fill(causal_mask, mask_value)
+
+    if exists(mask):
+        sim = sim.masked_fill(~mask[:, None, None, :], mask_value)
 
     attn = sim.softmax(dim = -1)
     return einsum('... i j, ... j d -> ... i d', attn, v)
