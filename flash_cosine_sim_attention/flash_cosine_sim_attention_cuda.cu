@@ -222,9 +222,9 @@ __global__ void backward_kernel(
     float* sm_v = (float*) &sm_k[k_block_size * k_dim];
     float* sm_l = (float*) &sm_v[k_block_size * v_dim];
     float* sm_o = (float*) &sm_l[q_block_size];
-    float* sm_do = (float*) &sm_l[q_block_size * v_dim];
+    float* sm_do = (float*) &sm_o[q_block_size * v_dim];
 
-    float* sm_dq = (float*) &sm_o[q_block_size * v_dim];
+    float* sm_dq = (float*) &sm_do[q_block_size * v_dim];
     float* sm_dk = (float*) &sm_dq[q_block_size * k_dim];
     float* sm_dv = (float*) &sm_dk[k_block_size * k_dim];
 
