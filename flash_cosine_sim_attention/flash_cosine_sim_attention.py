@@ -1,4 +1,5 @@
 import torch
+from torch import einsum
 import torch.nn.functional as F
 from torch.autograd import Function
 
@@ -21,6 +22,20 @@ def default(val, d):
 
 def l2norm(t):
     return F.normalize(t, dim = -1)
+
+# original cosine sim attention
+
+def plain_cosine_sim_attention(q, k, v, scale = 8, causal = False):
+    q, k = map(l2norm, (q, k))
+    sim = einsum('... i d, ... j d -> ... i j', q, k)
+    sim = sim * scale
+
+    if causal:
+        causal_mask = torch.ones(sim.shape[-2:], device = q.device).triu(1)
+        sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
+
+    attn = sim.softmax(dim = -1)
+    return einsum('... i j, ... j d -> ... i d', attn, v)
 
 # main class
 
@@ -73,8 +88,8 @@ def flash_cosine_sim_attention(
     scale = 8,
     causal = False,
     mask = None,
-    q_block_size = 32,
-    k_block_size = 32
+    q_block_size = 16,
+    k_block_size = 16
 ):
     q, k = map(l2norm, (q, k))
     o = FlashCosineSimAttention.apply(q, k, v, scale, causal, mask, q_block_size, k_block_size)
