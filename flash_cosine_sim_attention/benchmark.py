@@ -38,12 +38,11 @@ def benchmark(
             if not backwards:
                 end_event.record()
 
-            loss = o.sum()
-
             if not forwards:
                 start_event.record()
 
             if backwards:
+                loss = o.sum()
                 loss.backward()
                 end_event.record()
 
