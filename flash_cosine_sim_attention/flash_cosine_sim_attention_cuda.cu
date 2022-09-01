@@ -264,6 +264,7 @@ __global__ void backward_kernel(
                 }
 
                 for (int d = 0; d < v_dim; d++) {
+                    sm_o[sm_o_offset + d] = o_[global_row][d];
                     sm_do[sm_o_offset + d] = do_[global_row][d];
                 }
 
