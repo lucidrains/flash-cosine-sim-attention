@@ -95,7 +95,7 @@ class FlashCosineSimAttention(Function):
     def backward(ctx, do):
         o, l, q, k, v, mask, attn_bias = ctx.saved_tensors
 
-        heads, src_seq, tgt_seq, device, dtype = q.shape[1], q.shape[2], k.shape[2], q.device, q.dtype
+        batch, heads, src_seq, tgt_seq, device, dtype = *q.shape[:3], k.shape[2], q.device, q.dtype
 
         scale = ctx.scale
         causal = ctx.causal
@@ -104,11 +104,11 @@ class FlashCosineSimAttention(Function):
 
         dq, dk, dv = map(torch.zeros_like, (q, k, v))
 
-        d_attn_bias_input = torch.zeros((heads, src_seq, tgt_seq), device = device, dtype = dtype) if attn_bias.requires_grad else torch.zeros((heads, 0, 0), device = device, dtype = dtype)
+        d_attn_bias_input = torch.zeros((batch, heads, src_seq, tgt_seq), device = device, dtype = dtype) if attn_bias.requires_grad else torch.zeros((batch, heads, 0, 0), device = device, dtype = dtype)
 
         dq, dk, dv = backward(do, o, l, q, k, v, dq, dk, dv, d_attn_bias_input, mask, attn_bias, scale, causal, q_block_size, k_block_size)
 
-        db = d_attn_bias_input if attn_bias.requires_grad else None
+        db = d_attn_bias_input.sum(dim = 0) if attn_bias.requires_grad else None
 
         return dq, dk, dv, None, None, None, db, None, None
 

@@ -181,7 +181,7 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dq,
           PackedAccessor<scalar_t, 4> dk,
           PackedAccessor<scalar_t, 4> dv,
-          PackedAccessor<scalar_t, 3> d_attn_bias,
+          PackedAccessor<scalar_t, 4> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
     const PackedAccessor<scalar_t, 3> l,
@@ -209,15 +209,13 @@ __global__ void backward_kernel(
     const int sm_v_offset = col_tile_idx * v_dim;
     const int sm_o_offset = row_tile_idx * v_dim;
 
-    const bool need_write_d_bias = d_attn_bias.size(1) > 0 && d_attn_bias.size(2) > 0;
-
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
     auto v_ = v[batch_idx][head_idx];
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
-    auto ds_ = d_attn_bias[head_idx];
+    auto ds_ = d_attn_bias[batch_idx][head_idx];
     auto o_ = o[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto do_ = d_out[batch_idx][head_idx];
@@ -340,7 +338,7 @@ __global__ void backward_kernel(
             if (should_calculate_attn) {
                 dS = attn * (dp - D);
 
-                if (need_write_d_bias) {
+                if (has_attn_bias) {
                     ds_[global_row][global_col] = dS;
                 }
             }
@@ -493,7 +491,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             dq.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dk.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            d_attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+            d_attn_bias.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
