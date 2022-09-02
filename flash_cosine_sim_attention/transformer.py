@@ -49,10 +49,12 @@ class Attention(nn.Module):
         dim,
         dim_head = 64,
         heads = 8,
+        scale = 8,
         use_cuda_kernel = False
     ):
         super().__init__()
         inner_dim = dim_head * heads
+        self.scale = scale
         self.use_cuda_kernel = use_cuda_kernel
 
         self.heads = heads
@@ -62,7 +64,7 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
     def forward(self, x):
-        h = self.heads
+        h, scale = self.heads, self.scale
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
@@ -70,7 +72,7 @@ class Attention(nn.Module):
 
         attn_fn = plain_cosine_sim_attention if not self.use_cuda_kernel else flash_cosine_sim_attention
 
-        o = attn_fn(q, k, v, causal = True)
+        o = attn_fn(q, k, v, causal = True, scale = scale)
 
         o = rearrange(o, 'b h n d -> b n (h d)')
         return self.to_out(o)
@@ -85,6 +87,7 @@ class CosineSimCausalTransformer(nn.Module):
         dim,
         max_seq_len,
         depth,
+        attn_scale = 8,
         heads = 8,
         dim_head = 64,
         use_cuda_kernel = False
@@ -98,7 +101,7 @@ class CosineSimCausalTransformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel),
+                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale),
                 FeedForward(dim)
             ]))
 
