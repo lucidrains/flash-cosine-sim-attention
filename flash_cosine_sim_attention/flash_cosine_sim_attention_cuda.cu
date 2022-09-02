@@ -331,6 +331,8 @@ __global__ void backward_kernel(
                 }
             }
 
+            __syncthreads();
+
             // calculate dS
 
             float dS = 0;
@@ -342,6 +344,8 @@ __global__ void backward_kernel(
                     ds_[global_row][global_col] = dS;
                 }
             }
+
+            __syncthreads();
 
             // calculate dq and dk and write to shared memoery
 
