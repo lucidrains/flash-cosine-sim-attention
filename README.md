@@ -15,7 +15,7 @@ Update: Meta AI will be <a href="https://github.com/facebookresearch/xformers/pu
 For testing output and gradients are equal for non-autoregressive and autoregressive scenarios
 
 ```bash
-$ make test
+$ python setup.py test
 ```
 
 ## Citations

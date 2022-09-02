@@ -56,6 +56,12 @@ setup(
   install_requires=[
     'torch>=1.10',
   ],
+  setup_requires=[
+    'pytest-runner',
+  ],
+  tests_require=[
+    'pytest'
+  ],
   ext_modules = ext_modules(),
   cmdclass = {"build_ext": BuildExtension},
   include_package_data = True,
