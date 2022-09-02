@@ -39,7 +39,8 @@ model = CosineSimCausalTransformer(
     num_tokens = 256,
     dim = 512,
     depth = 8,
-    max_seq_len = SEQ_LEN
+    max_seq_len = SEQ_LEN,
+    use_cuda_kernel = False   # set this to True for cuda kernel use
 )
 
 model.cuda()
