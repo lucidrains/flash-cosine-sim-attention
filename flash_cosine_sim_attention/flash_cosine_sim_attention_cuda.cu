@@ -394,7 +394,7 @@ __global__ void backward_kernel(
 
 // main c++ function
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
+void flash_cosine_sim_attention_forward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
@@ -449,12 +449,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
         exit(-1);
     }
 
-    // output
-
-    return {o, l};
+    return;
 }
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
+void flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
     torch::Tensor l,
@@ -519,9 +517,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
         exit(-1);
     }
 
-    // output
-
-    return {dq, dk, dv};
+    return;
 }
 
 // bind
