@@ -65,7 +65,7 @@ __global__ void forward_kernel(
 
     // handle attention bias
 
-    const bool has_attn_bias = attn_bias.size(0) > 0;
+    const bool has_attn_bias = attn_bias.size(1) > 0 && attn_bias.size(2) > 0;
     auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // shared memory
@@ -221,7 +221,7 @@ __global__ void backward_kernel(
 
     // handle attention bias
 
-    const bool has_attn_bias = attn_bias.size(0) > 0;
+    const bool has_attn_bias = attn_bias.size(1) > 0 && attn_bias.size(2) > 0;
     auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // some variables
