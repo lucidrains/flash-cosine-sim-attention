@@ -1,7 +1,9 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <torch/extension.h>
+#include <cub/cub.cuh>
 #include <c10/cuda/CUDAGuard.h>
+
+#include <torch/extension.h>
 
 // type alias
 

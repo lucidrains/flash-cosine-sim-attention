@@ -3,7 +3,7 @@ install:
 	python setup.py install --user
 
 test: install
-	pytest .
+	python test.py
 
 clean:
 	rm -rf dist/ build/

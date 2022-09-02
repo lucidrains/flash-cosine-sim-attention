@@ -2,7 +2,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from einops import rearrange
+try:
+    from einops import rearrange
+except ImportError:
+    print('pip install einops to use transformer')
 
 from flash_cosine_sim_attention.flash_cosine_sim_attention import plain_cosine_sim_attention, flash_cosine_sim_attention
 
