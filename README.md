@@ -10,6 +10,14 @@ This will be my first attempt at CUDA, so welcome any help or advice.
 
 Update: Meta AI will be <a href="https://github.com/facebookresearch/xformers/pull/362#issuecomment-1212924962">considering merging the flash attention</a> implementation into Pytorch core. They have also done experiments on a variety of models and show that it is free from numerical issues. I suppose there is less a case for the cosine similarity variant other than that it could potentially be slightly faster. I will still complete it for my own GPGPU education.
 
+## Testing
+
+For testing output and gradients are equal for non-autoregressive and autoregressive scenarios
+
+```bash
+$ make test
+```
+
 ## Citations
 
 ```bibtex
