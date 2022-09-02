@@ -55,6 +55,7 @@ setup(
   ],
   install_requires=[
     'torch>=1.10',
+    'torchtyping'
   ],
   setup_requires=[
     'pytest-runner',

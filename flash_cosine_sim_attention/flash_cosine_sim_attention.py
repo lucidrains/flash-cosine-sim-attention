@@ -1,4 +1,6 @@
 import torch
+from typing import Optional
+from torchtyping import TensorType
 from torch import einsum
 import torch.nn.functional as F
 from torch.autograd import Function
@@ -25,16 +27,24 @@ def l2norm(t):
 
 # original cosine sim attention
 
+# b - batch
+# h - heads
+# i - src sequence length
+# j - target sequence length
+# d - feature dimension
+
 def plain_cosine_sim_attention(
-    q,
-    k,
-    v,
+    q: TensorType['b', 'h', 'i', 'd'],
+    k: TensorType['b', 'h', 'j', 'd'],
+    v: TensorType['b', 'h', 'j', 'd'],
+    mask: Optional[TensorType['b', 'j']] = None,
+    attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 8,
     causal = False,
-    mask = None,
-    attn_bias = None,
     l2norm_qk = True
-):
+
+) -> TensorType['b', 'h', 'i', 'd']:
+
     if l2norm_qk:
         q, k = map(l2norm, (q, k))
 
@@ -63,10 +73,10 @@ class FlashCosineSimAttention(Function):
     def forward(
         ctx,
         q, k, v,
-        scale,
-        causal,
         mask,
         attn_bias,
+        scale,
+        causal,
         q_block_size,
         k_block_size
     ):
@@ -110,22 +120,24 @@ class FlashCosineSimAttention(Function):
 
         db = d_attn_bias_input.sum(dim = 0) if attn_bias.requires_grad else None
 
-        return dq, dk, dv, None, None, None, db, None, None
+        return dq, dk, dv, None, db, None, None, None, None
 
 # wrapper function
 
 def flash_cosine_sim_attention(
-    q, k, v,
+    q: TensorType['b', 'h', 'i', 'd'],
+    k: TensorType['b', 'h', 'j', 'd'],
+    v: TensorType['b', 'h', 'j', 'd'],
+    mask: Optional[TensorType['b', 'j']] = None,
+    attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 8,
     causal = False,
-    mask = None,
-    attn_bias = None,
     q_block_size = 16,
     k_block_size = 16,
     l2norm_qk = True
-):
+) -> TensorType['b', 'h', 'i', 'd']:
+
     if l2norm_qk:
         q, k = map(l2norm, (q, k))
 
-    o = FlashCosineSimAttention.apply(q, k, v, scale, causal, mask, attn_bias, q_block_size, k_block_size)
-    return o
+    return FlashCosineSimAttention.apply(q, k, v, mask, attn_bias, scale, causal, q_block_size, k_block_size)
