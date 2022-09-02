@@ -25,10 +25,21 @@ def l2norm(t):
 
 # original cosine sim attention
 
-def plain_cosine_sim_attention(q, k, v, scale = 8, causal = False, mask = None):
+def plain_cosine_sim_attention(
+    q,
+    k,
+    v,
+    scale = 8,
+    causal = False,
+    mask = None,
+    attn_bias = None
+):
     q, k = map(l2norm, (q, k))
     sim = einsum('... i d, ... j d -> ... i j', q, k)
     sim = sim * scale
+
+    if exists(attn_bias):
+        sim = sim + attn_bias[None, ...]
 
     mask_value = -torch.finfo(sim.dtype).max
 
@@ -52,6 +63,7 @@ class FlashCosineSimAttention(Function):
         scale,
         causal,
         mask,
+        attn_bias,
         q_block_size,
         k_block_size
     ):
@@ -62,11 +74,13 @@ class FlashCosineSimAttention(Function):
         o = torch.zeros((batch, heads, seq, dim), device = device, dtype = torch.float32)
         l = torch.zeros((batch, heads, seq), device = device, dtype = torch.float32)
 
-        forward(q, k, v, o, l, mask, scale, causal, q_block_size, k_block_size)
+        attn_bias = default(attn_bias, torch.zeros(1, 0, 0, device = q.device, dtype = dtype))
+
+        forward(q, k, v, o, l, mask, attn_bias, scale, causal, q_block_size, k_block_size)
 
         o.div_(l[..., None].clamp(min = 1e-20))
 
-        ctx.save_for_backward(o, l, q, k, v, mask)
+        ctx.save_for_backward(o, l, q, k, v, mask, attn_bias)
 
         ctx.scale = scale
         ctx.causal = causal
@@ -76,7 +90,7 @@ class FlashCosineSimAttention(Function):
 
     @staticmethod
     def backward(ctx, do):
-        o, l, q, k, v, mask = ctx.saved_tensors
+        o, l, q, k, v, mask, attn_bias = ctx.saved_tensors
 
         scale = ctx.scale
         causal = ctx.causal
@@ -85,8 +99,8 @@ class FlashCosineSimAttention(Function):
 
         dq, dk, dv = map(torch.zeros_like, (q, k, v))
 
-        dq, dk, dv = backward(do, o, l, q, k, v, dq, dk, dv, mask, scale, causal, q_block_size, k_block_size)
-        return dq, dk, dv, None, None, None, None, None
+        dq, dk, dv = backward(do, o, l, q, k, v, dq, dk, dv, mask, attn_bias, scale, causal, q_block_size, k_block_size)
+        return dq, dk, dv, None, None, None, None, None, None
 
 # wrapper function
 
@@ -95,9 +109,10 @@ def flash_cosine_sim_attention(
     scale = 8,
     causal = False,
     mask = None,
+    attn_bias = None,
     q_block_size = 16,
     k_block_size = 16
 ):
     q, k = map(l2norm, (q, k))
-    o = FlashCosineSimAttention.apply(q, k, v, scale, causal, mask, q_block_size, k_block_size)
+    o = FlashCosineSimAttention.apply(q, k, v, scale, causal, mask, attn_bias, q_block_size, k_block_size)
     return o

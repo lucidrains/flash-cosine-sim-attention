@@ -29,6 +29,7 @@ __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
     const PackedAccessor<bool, 2> mask,
+    const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<scalar_t, 4> o,
           PackedAccessor<scalar_t, 3> l,
     const float scale,
@@ -61,6 +62,11 @@ __global__ void forward_kernel(
     auto o_ = o[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
+
+    // handle attention bias
+
+    const bool has_attn_bias = attn_bias.size(0) > 0;
+    auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // shared memory
 
@@ -126,6 +132,11 @@ __global__ void forward_kernel(
                 }
 
                 attn *= scale;
+
+                if (has_attn_bias) {
+                    attn += attn_bias_[global_row][global_col];
+                }
+
                 attn -= scale;
                 attn = __expf(attn);
 
@@ -166,6 +177,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
     const PackedAccessor<bool, 2> mask,
+    const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<scalar_t, 4> dq,
           PackedAccessor<scalar_t, 4> dk,
           PackedAccessor<scalar_t, 4> dv,
@@ -206,6 +218,11 @@ __global__ void backward_kernel(
     auto l_ = l[batch_idx][head_idx];
     auto do_ = d_out[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
+
+    // handle attention bias
+
+    const bool has_attn_bias = attn_bias.size(0) > 0;
+    auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // some variables
 
@@ -282,6 +299,11 @@ __global__ void backward_kernel(
                 }
 
                 attn *= scale;
+
+                if (has_attn_bias) {
+                    attn += attn_bias_[global_row][global_col];
+                }
+
                 attn -= scale;
                 attn = __expf(attn);
                 attn /= max(sm_l[row_tile_idx], 1e-10);
@@ -365,6 +387,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor o,
     torch::Tensor l,
     torch::Tensor mask,
+    torch::Tensor attn_bias,
     float scale,
     bool causal,
     int q_block_size,
@@ -391,6 +414,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
+            attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
@@ -427,6 +451,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor dk,
     torch::Tensor dv,
     torch::Tensor mask,
+    torch::Tensor attn_bias,
     float scale,
     bool causal,
     int q_block_size,
@@ -453,6 +478,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
+            attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             dq.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dk.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
