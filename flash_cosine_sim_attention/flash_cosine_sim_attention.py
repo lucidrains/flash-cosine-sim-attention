@@ -32,9 +32,12 @@ def plain_cosine_sim_attention(
     scale = 8,
     causal = False,
     mask = None,
-    attn_bias = None
+    attn_bias = None,
+    l2norm_qk = True
 ):
-    q, k = map(l2norm, (q, k))
+    if l2norm_qk:
+        q, k = map(l2norm, (q, k))
+
     sim = einsum('... i d, ... j d -> ... i j', q, k)
     sim = sim * scale
 
@@ -111,8 +114,11 @@ def flash_cosine_sim_attention(
     mask = None,
     attn_bias = None,
     q_block_size = 16,
-    k_block_size = 16
+    k_block_size = 16,
+    l2norm_qk = True
 ):
-    q, k = map(l2norm, (q, k))
+    if l2norm_qk:
+        q, k = map(l2norm, (q, k))
+
     o = FlashCosineSimAttention.apply(q, k, v, scale, causal, mask, attn_bias, q_block_size, k_block_size)
     return o
