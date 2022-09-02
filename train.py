@@ -1,13 +1,21 @@
 from flash_cosine_sim_attention.transformer import CosineSimCausalTransformer
 
+import argparse
 import random
 import tqdm
 import gzip
 import numpy as np
+
 import torch
 import torch.optim as optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
+
+# arguments
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--use-cuda-kernel', default = False, action = 'store_true')
+arguments = parser.parse_args()
 
 # constants
 
@@ -40,7 +48,7 @@ model = CosineSimCausalTransformer(
     dim = 512,
     depth = 8,
     max_seq_len = SEQ_LEN,
-    use_cuda_kernel = False   # set this to True for cuda kernel use
+    use_cuda_kernel = arguments.use_cuda_kernel
 )
 
 model.cuda()

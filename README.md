@@ -18,6 +18,12 @@ For testing output and gradients are equal for non-autoregressive and autoregres
 $ python setup.py test
 ```
 
+For testing the cuda kernel on enwik8 training
+
+```bash
+$ pip install -r requirements.txt && python train.py --use-cuda-kernel
+```
+
 ## Citations
 
 ```bibtex
