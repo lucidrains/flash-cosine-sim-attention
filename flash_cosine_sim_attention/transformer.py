@@ -14,6 +14,9 @@ from flash_cosine_sim_attention.flash_cosine_sim_attention import plain_cosine_s
 def exists(val):
     return val is not None
 
+def init_weight_xavier_normal_(module, beta):
+    nn.init.xavier_normal_(module.weight.data, gain = beta)
+
 def eval_decorator(fn):
     def inner(model, *args, **kwargs):
         was_training = model.training
@@ -37,10 +40,9 @@ def top_k(logits, thres = 0.9):
 def FeedForward(dim, mult = 4):
     dim_hidden = int(dim * mult)
     return nn.Sequential(
-        nn.LayerNorm(dim),
-        nn.Linear(dim, dim_hidden),
+        nn.Linear(dim, dim_hidden, bias = False),
         nn.GELU(),
-        nn.Linear(dim_hidden, dim)
+        nn.Linear(dim_hidden, dim, bias = False)
     )
 
 class Attention(nn.Module):
@@ -58,16 +60,16 @@ class Attention(nn.Module):
         self.use_cuda_kernel = use_cuda_kernel
 
         self.heads = heads
-        self.norm = nn.LayerNorm(dim)
 
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.to_q = nn.Linear(dim, inner_dim, bias = False)
+        self.to_k = nn.Linear(dim, inner_dim, bias = False)
+        self.to_v = nn.Linear(dim, inner_dim, bias = False)
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
     def forward(self, x):
         h, scale = self.heads, self.scale
-        x = self.norm(x)
 
-        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
         attn_fn = plain_cosine_sim_attention if not self.use_cuda_kernel else flash_cosine_sim_attention
@@ -98,17 +100,36 @@ class CosineSimCausalTransformer(nn.Module):
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
 
+        self.residual_scale = (2 * depth) ** 0.25
+
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale),
-                FeedForward(dim)
+                nn.LayerNorm(dim),
+                FeedForward(dim),
+                nn.LayerNorm(dim),
             ]))
 
-        self.to_logits = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_tokens)
-        )
+        self.to_logits = nn.Linear(dim, num_tokens, bias = False)
+
+        self.init_(depth)
+
+    def init_(self, depth):
+        nn.init.normal_(self.token_emb.weight, std = 1e-5)
+        nn.init.normal_(self.pos_emb.weight, std = 1e-5)
+
+        init_gain = (8 * depth) ** -0.25
+
+        for attn, _, ff, _ in self.layers:
+            init_weight_xavier_normal_(attn.to_q, 1.)
+            init_weight_xavier_normal_(attn.to_k, 1.)
+            init_weight_xavier_normal_(attn.to_v, init_gain)
+            init_weight_xavier_normal_(attn.to_out, init_gain)
+            init_weight_xavier_normal_(ff[0], init_gain)
+            init_weight_xavier_normal_(ff[2], init_gain)
+
+        init_weight_xavier_normal_(self.to_logits, 1)
 
     @torch.no_grad()
     @eval_decorator
@@ -133,9 +154,11 @@ class CosineSimCausalTransformer(nn.Module):
         x = self.token_emb(x)
         x = x + self.pos_emb(torch.arange(x.shape[1], device = x.device))
 
-        for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
+        for attn, attn_norm, ff, ff_norm in self.layers:
+            x = attn(x) + x * self.residual_scale
+            x = attn_norm(x)
+            x = ff(x) + x * self.residual_scale
+            x = ff_norm(x)
 
         logits = self.to_logits(x)
 
