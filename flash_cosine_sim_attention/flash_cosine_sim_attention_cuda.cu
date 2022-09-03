@@ -121,12 +121,20 @@ __global__ void forward_kernel(
         global_col = col_tiles_offset + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
-        if (row_tile_idx == 0 && should_calculate_col) {
-            for (int d = 0; d < k_dim; d++) {
+        if (should_calculate_col) {
+            for (
+                int d = row_tile_idx;
+                d < k_dim;
+                d += q_block_size
+            ) {
                 sm_k[sm_k_offset + d] = k_[global_col][d];
             }
 
-            for (int d = 0; d < v_dim; d++) {
+            for (
+                int d = row_tile_idx;
+                d < v_dim;
+                d += q_block_size
+            ) {
                 sm_v[sm_v_offset + d] = v_[global_col][d];
             }
         }
@@ -141,14 +149,22 @@ __global__ void forward_kernel(
                                     ( !causal ||
                                       (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
-            if (col_tile_idx == 0 && should_calculate_row) {
-                for (int d = 0; d < k_dim; d++) {
+            if (should_calculate_row) {
+                for (
+                    int d = col_tile_idx;
+                    d < k_dim;
+                    d += k_block_size
+                ) {
                     sm_q[sm_q_offset + d] = q_[global_row][d];
                 }
 
                 sm_l[row_tile_idx] = l_[global_row];
 
-                for (int d = 0; d < v_dim; d++) {
+                for (
+                    int d = col_tile_idx;
+                    d < v_dim;
+                    d += k_block_size
+                ) {
                     sm_o[sm_o_offset + d] = o_[global_row][d];
                 }
             }
@@ -182,14 +198,16 @@ __global__ void forward_kernel(
 
             __syncthreads();
 
-            float tmp_row_sum;
+            if (should_calculate_row) {
+                if (col_tile_idx == 0) {
+                    l_[global_row] = sm_l[row_tile_idx];
+                }
 
-            if (col_tile_idx == 0 && should_calculate_row) {
-                tmp_row_sum = sm_l[row_tile_idx];
-
-                l_[global_row] = tmp_row_sum;
-
-                for (int d = 0; d < v_dim; d++) {
+                for (
+                    int d = col_tile_idx;
+                    d < v_dim;
+                    d += k_block_size
+                ) {
                     o_[global_row][d] = sm_o[sm_o_offset + d];
                 }
             }
@@ -344,16 +362,22 @@ __global__ void backward_kernel(
         global_col = col_tiles_offset + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
-        if (row_tile_idx == 0) {
-            for (int d = 0; d < k_dim; d++) {
-                sm_k[sm_k_offset + d] = k_[global_col][d];
-                sm_dk[sm_k_offset + d] = 0.;
-            }
+        for (
+            int d = row_tile_idx;
+            d < k_dim;
+            d += q_block_size
+        ) {
+            sm_k[sm_k_offset + d] = k_[global_col][d];
+            sm_dk[sm_k_offset + d] = 0.;            
+        }
 
-            for (int d = 0; d < v_dim; d++) {
-                sm_v[sm_v_offset + d] = v_[global_col][d];
-                sm_dv[sm_v_offset + d] = 0.;
-            }
+        for (
+            int d = row_tile_idx;
+            d < v_dim;
+            d += q_block_size
+        ) {
+            sm_v[sm_v_offset + d] = v_[global_col][d];
+            sm_dv[sm_v_offset + d] = 0.;
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
@@ -366,16 +390,24 @@ __global__ void backward_kernel(
                                     ( !causal ||
                                       (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
+            for (
+                int d = col_tile_idx;
+                d < k_dim;
+                d += k_block_size
+            ) {
+                sm_q[sm_q_offset + d] = q_[global_row][d];
+                sm_dq[sm_q_offset + d] = dq_[global_row][d];
+            }
+
+            for (
+                int d = col_tile_idx;
+                d < v_dim;
+                d += k_block_size
+            ) {
+                sm_do[sm_o_offset + d] = do_[global_row][d];
+            }
+
             if (col_tile_idx == 0) {
-                for (int d = 0; d < k_dim; d++) {
-                    sm_q[sm_q_offset + d] = q_[global_row][d];
-                    sm_dq[sm_q_offset + d] = dq_[global_row][d];
-                }
-
-                for (int d = 0; d < v_dim; d++) {
-                    sm_do[sm_o_offset + d] = do_[global_row][d];
-                }
-
                 sm_do_scaled[row_tile_idx] = do_scaled_[global_row];
                 sm_l[row_tile_idx] = l_[global_row];
             }
@@ -456,12 +488,20 @@ __global__ void backward_kernel(
 
         // write dk and dv out to hbm
 
-        if (row_tile_idx == 0 && should_calculate_col) {
-            for (int d = 0; d < k_dim; d++) {
+        if (should_calculate_col) {
+            for (
+                int d = row_tile_idx;
+                d < k_dim;
+                d += q_block_size
+            ) {
                 dk_[global_col][d] = sm_dk[sm_k_offset + d];
             }
 
-            for (int d = 0; d < v_dim; d++) {
+            for (
+                int d = row_tile_idx;
+                d < v_dim;
+                d += q_block_size
+            ) {
                 dv_[global_col][d] = sm_dv[sm_v_offset + d];
             }
         }
