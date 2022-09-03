@@ -374,8 +374,6 @@ __global__ void backward_kernel(
 
             float D = sm_do_scaled[row_tile_idx];
 
-            __syncthreads();
-
             // calculate dS
 
             float dS = 0;
@@ -414,8 +412,6 @@ __global__ void backward_kernel(
 
             __syncthreads();
         }
-
-        __syncthreads();
 
         // write dk and dv out to hbm
 
