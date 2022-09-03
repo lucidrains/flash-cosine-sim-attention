@@ -101,8 +101,7 @@ __global__ void forward_kernel(
     float* sm_q = (float*) &_shared_mem;
     float* sm_k = (float*) &sm_q[q_block_size * k_dim];
     float* sm_v = (float*) &sm_k[k_block_size * k_dim];
-    float* sm_l = (float*) &sm_v[k_block_size * v_dim];
-    float* sm_o = (float*) &sm_l[q_block_size];
+    float* sm_o = (float*) &sm_v[k_block_size * v_dim];
 
     // some variable
 
@@ -154,8 +153,6 @@ __global__ void forward_kernel(
                     sm_q[sm_q_offset + d] = q_[global_row][d];
                 }
 
-                sm_l[row_tile_idx] = l_[global_row];
-
                 for (
                     int d = col_tile_idx;
                     d < v_dim;
@@ -182,7 +179,7 @@ __global__ void forward_kernel(
                 attn -= scale;
                 attn = __expf(attn);
 
-                atomicAdd(&sm_l[row_tile_idx], attn);
+                atomicAdd((float*) &l_[global_row], attn);
 
                 float exp_weighted_value;
 
@@ -195,10 +192,6 @@ __global__ void forward_kernel(
             __syncthreads();
 
             if (should_calculate_row) {
-                if (col_tile_idx == 0) {
-                    l_[global_row] = sm_l[row_tile_idx];
-                }
-
                 for (
                     int d = col_tile_idx;
                     d < v_dim;
@@ -211,6 +204,60 @@ __global__ void forward_kernel(
             __syncthreads();
         }
     }
+}
+
+// forwards c++ function
+
+void flash_cosine_sim_attention_forward(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor o,
+    torch::Tensor l,
+    torch::Tensor mask,
+    torch::Tensor attn_bias,
+    float scale,
+    bool causal,
+    int q_block_size,
+    int k_block_size
+) {
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
+
+    const int batch = q.size(0);
+    const int heads = q.size(1);
+    const int k_dim = k.size(3);
+    const int v_dim = v.size(3);
+
+    const dim3 threads_per_block(q_block_size, k_block_size);
+    const dim3 blocks(batch, heads);
+    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim +  // q, k
+                                        k_block_size * v_dim +                  // v
+                                        q_block_size * v_dim                    // o
+                                      ) * sizeof(float);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
+        forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
+            q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
+            attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+            o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+            scale,
+            causal,
+            q_block_size,
+            k_block_size
+        );
+    }));
+
+    cudaDeviceSynchronize();
+
+    // handle error
+
+    CHECK_LAST_CUDA_ERROR();
+
+    return;
 }
 
 // backward kernel
@@ -500,60 +547,7 @@ __global__ void backward_kernel(
     }
 }
 
-// main c++ function
-
-void flash_cosine_sim_attention_forward(
-    torch::Tensor q,
-    torch::Tensor k,
-    torch::Tensor v,
-    torch::Tensor o,
-    torch::Tensor l,
-    torch::Tensor mask,
-    torch::Tensor attn_bias,
-    float scale,
-    bool causal,
-    int q_block_size,
-    int k_block_size
-) {
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
-
-    const int batch = q.size(0);
-    const int heads = q.size(1);
-    const int k_dim = k.size(3);
-    const int v_dim = v.size(3);
-
-    const dim3 threads_per_block(q_block_size, k_block_size);
-    const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim +  // q, k
-                                        k_block_size * v_dim +                  // v
-                                        q_block_size * v_dim +                  // o
-                                        q_block_size                            // l
-                                      ) * sizeof(float);
-
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
-        forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
-            q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
-            attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            scale,
-            causal,
-            q_block_size,
-            k_block_size
-        );
-    }));
-
-    cudaDeviceSynchronize();
-
-    // handle error
-
-    CHECK_LAST_CUDA_ERROR();
-
-    return;
-}
+// backwards c++ function
 
 void flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
