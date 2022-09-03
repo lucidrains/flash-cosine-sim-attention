@@ -480,15 +480,13 @@ __global__ void backward_kernel(
                 }
             }
 
-            // fetch precalculated D = rowsum(do * o)
-
-            float D = sm_do_scaled[row_tile_idx];
-
             // calculate dS
 
             float dS = 0;
 
             if (should_calculate_attn) {
+                float D = sm_do_scaled[row_tile_idx];
+
                 dS = attn * (dp - D);
 
                 if (has_attn_bias) {
