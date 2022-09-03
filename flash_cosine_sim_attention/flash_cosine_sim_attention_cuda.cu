@@ -171,7 +171,55 @@ __global__ void forward_kernel(
     }
 }
 
- // backward kernel
+// backward kernel
+
+// backwards preprocess
+
+// calculate do_scaled = rowsum(do * o)
+// done by @ptillet at https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
+
+template <typename scalar_t>
+__global__ void backward_calculate_do_scaled(
+    const PackedAccessor<scalar_t, 4> d_out,
+    const PackedAccessor<scalar_t, 4> o,
+          PackedAccessor<scalar_t, 3> do_scaled
+) {
+    const int heads = o.size(1);
+    const int v_dim = o.size(3);
+
+    const int batch_idx = blockIdx.x / heads;
+    const int head_idx = blockIdx.x % heads;
+    const int seq_idx = blockIdx.y;
+    const int dim_idx = threadIdx.x;
+
+    extern __shared__ float _shared_mem_preprocess[];
+
+    float* sm_do_scaled = (float*) &_shared_mem_preprocess;
+
+    auto do_ = d_out[batch_idx][head_idx][seq_idx];
+    auto o_ = o[batch_idx][head_idx][seq_idx];
+    auto do_scaled_ = do_scaled[batch_idx][head_idx];
+
+    // load into shared memory
+
+    sm_do_scaled[dim_idx] = do_[dim_idx] * o_[dim_idx];
+
+    __syncthreads();
+
+    // worst sum reduce
+
+    if (dim_idx == 0) {
+        float tmp = 0;
+
+        for (int i = 0; i < v_dim; i++) {
+            tmp += sm_do_scaled[i];
+        }
+
+        do_scaled_[seq_idx] = tmp;
+    }
+}
+
+// main backward kernel
 
 template <typename scalar_t>
 __global__ void backward_kernel(
@@ -185,7 +233,7 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dv,
           PackedAccessor<scalar_t, 4> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out,
-    const PackedAccessor<scalar_t, 4> o,
+    const PackedAccessor<scalar_t, 3> do_scaled,
     const PackedAccessor<scalar_t, 3> l,
     const float scale,
     const bool causal,
@@ -218,7 +266,7 @@ __global__ void backward_kernel(
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
     auto ds_ = d_attn_bias[batch_idx][head_idx];
-    auto o_ = o[batch_idx][head_idx];
+    auto do_scaled_ = do_scaled[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto do_ = d_out[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
@@ -242,8 +290,8 @@ __global__ void backward_kernel(
     float* sm_k = (float*) &sm_q[q_block_size * k_dim];
     float* sm_v = (float*) &sm_k[k_block_size * k_dim];
     float* sm_l = (float*) &sm_v[k_block_size * v_dim];
-    float* sm_o = (float*) &sm_l[q_block_size];
-    float* sm_do = (float*) &sm_o[q_block_size * v_dim];
+    float* sm_do_scaled = (float*) &sm_l[q_block_size];
+    float* sm_do = (float*) &sm_do_scaled[q_block_size];
 
     float* sm_dq = (float*) &sm_do[q_block_size * v_dim];
     float* sm_dk = (float*) &sm_dq[q_block_size * k_dim];
@@ -285,10 +333,10 @@ __global__ void backward_kernel(
                 }
 
                 for (int d = 0; d < v_dim; d++) {
-                    sm_o[sm_o_offset + d] = o_[global_row][d];
                     sm_do[sm_o_offset + d] = do_[global_row][d];
                 }
 
+                sm_do_scaled[row_tile_idx] = do_scaled_[global_row];
                 sm_l[row_tile_idx] = l_[global_row];
             }
 
@@ -323,15 +371,9 @@ __global__ void backward_kernel(
                 }
             }
 
-            // naively calculate D = rowsum(DO * O)
+            // fetch precalculated D = rowsum(do * o)
 
-            float D = 0;
-
-            if (should_calculate_row) {
-                for (int d = 0; d < v_dim; d++) {
-                    D += sm_do[sm_o_offset + d] * sm_o[sm_o_offset + d];
-                }
-            }
+            float D = sm_do_scaled[row_tile_idx];
 
             __syncthreads();
 
@@ -463,6 +505,7 @@ void flash_cosine_sim_attention_backward(
     torch::Tensor dk,
     torch::Tensor dv,
     torch::Tensor d_attn_bias,
+    torch::Tensor do_scaled,
     torch::Tensor mask,
     torch::Tensor attn_bias,
     float scale,
@@ -474,19 +517,33 @@ void flash_cosine_sim_attention_backward(
 
     const int batch = dq.size(0);
     const int heads = dq.size(1);
+    const int seq   = dq.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const dim3 threads_per_block(q_block_size, k_block_size);
-    const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim * 2 +   // q, k, dq, dk
-                                        k_block_size * v_dim * 2 +                   // v, dv
-                                        q_block_size * v_dim * 2 +                   // o, do
-                                        q_block_size                                 // l
-                                      ) * sizeof(float);
+    // setup backwards preprocess call
+
+    const dim3 backwards_preprocess_threads_per_block(v_dim);
+    const dim3 backwards_preprocess_blocks(batch * heads, seq);
+
+    const unsigned backwards_preprocess_shared_mem_size = v_dim * sizeof(float);
+
+    const dim3 backwards_threads_per_block(q_block_size, k_block_size);
+    const dim3 backwards_blocks(batch, heads);
+    const unsigned backwards_shared_mem_size = (( q_block_size + k_block_size) * k_dim * 2 +   // q, k, dq, dk
+                                                  k_block_size * v_dim * 2 +                   // v, dv
+                                                  q_block_size * v_dim +                       // do
+                                                  q_block_size                                 // l, do_scaled
+                                                ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
-        backward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
+        backward_calculate_do_scaled<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
+            d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            do_scaled.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>()
+        );
+
+        backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
             q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
@@ -497,7 +554,7 @@ void flash_cosine_sim_attention_backward(
             dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             d_attn_bias.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            do_scaled.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
             causal,

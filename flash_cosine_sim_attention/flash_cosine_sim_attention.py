@@ -115,8 +115,9 @@ class FlashCosineSimAttention(Function):
         dq, dk, dv = map(torch.zeros_like, (q, k, v))
 
         d_attn_bias_input = torch.zeros((batch, heads, src_seq, tgt_seq), device = device, dtype = dtype) if attn_bias.requires_grad else torch.zeros((batch, heads, 0, 0), device = device, dtype = dtype)
+        do_scaled = torch.zeros_like(l)
 
-        backward(do, o, l, q, k, v, dq, dk, dv, d_attn_bias_input, mask, attn_bias, scale, causal, q_block_size, k_block_size)
+        backward(do, o, l, q, k, v, dq, dk, dv, d_attn_bias_input, do_scaled, mask, attn_bias, scale, causal, q_block_size, k_block_size)
 
         db = d_attn_bias_input.sum(dim = 0) if attn_bias.requires_grad else None
 
