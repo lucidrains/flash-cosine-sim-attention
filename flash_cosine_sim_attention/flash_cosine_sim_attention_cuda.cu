@@ -4,6 +4,10 @@
 
 #include <torch/extension.h>
 
+// constants
+
+__constant__ int warp_size = 32;
+
 // error handler
 // from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
 
@@ -232,7 +236,6 @@ __global__ void backward_calculate_do_scaled(
 
     // better sum reduce
 
-    const int warp_size = 32;
     const int start_sum_reduce_stride = next_pow_2(v_dim) / 2;
     const bool need_final_warp_reduce = start_sum_reduce_stride >= warp_size;
 
