@@ -41,14 +41,10 @@ __device__ int next_pow_2(int n) {
 }
 
 __device__ void warp_reduce(volatile float* sm, int tid, int max) {
-    if ((tid + 32) < max)
-        sm[tid] += sm[tid + 32];
-
-    sm[tid] += sm[tid + 16];
-    sm[tid] += sm[tid + 8];
-    sm[tid] += sm[tid + 4];
-    sm[tid] += sm[tid + 2];
-    sm[tid] += sm[tid + 1];
+    for (int s = warp_size; s > 0; s>>=1) {
+        if ((tid + s) < max)
+            sm[tid] += sm[tid + s];
+    }
 }
 
 // forward kernel
@@ -255,7 +251,6 @@ __global__ void backward_calculate_do_scaled(
     // better sum reduce
 
     const int start_sum_reduce_stride = next_pow_2(v_dim) / 2;
-    const bool need_final_warp_reduce = start_sum_reduce_stride >= warp_size;
 
     for (int s = start_sum_reduce_stride; s > warp_size; s>>=1) {
 
@@ -265,12 +260,9 @@ __global__ void backward_calculate_do_scaled(
         __syncthreads();
     }
 
-    if (need_final_warp_reduce) {
-        if (dim_idx < warp_size) {
-            warp_reduce(sm_do_scaled, dim_idx, v_dim);
-        }
-        __syncthreads();
-    }
+    warp_reduce(sm_do_scaled, dim_idx, v_dim);
+
+    __syncthreads();
 
     if (dim_idx == 0) {
         do_scaled_[seq_idx] = sm_do_scaled[0];

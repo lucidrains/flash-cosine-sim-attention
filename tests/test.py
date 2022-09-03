@@ -13,19 +13,21 @@ def allclose(a, b, atol = 1e-5):
 # tests
 
 @pytest.mark.parametrize('causal', [True, False])
-def test_output_equal(causal):
-    q = torch.randn(2, 4, 63, 63).cuda()
-    k = torch.randn(2, 4, 63, 63).cuda()
-    v = torch.randn(2, 4, 63, 63).cuda()
+@pytest.mark.parametrize('dim_head', [15, 31, 63])
+def test_output_equal(causal, dim_head):
+    q = torch.randn(2, 4, 63, dim_head).cuda()
+    k = torch.randn(2, 4, 63, dim_head).cuda()
+    v = torch.randn(2, 4, 63, dim_head).cuda()
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal)
     flash_output = flash_cosine_sim_attention(q, k, v, causal = causal)
     assert allclose(plain_output, flash_output)
 
 @pytest.mark.parametrize('causal', [True, False])
-def test_grad_equal(causal):
-    q = torch.randn(2, 4, 63, 63).cuda().requires_grad_()
-    k = torch.randn(2, 4, 63, 63).cuda().requires_grad_()
-    v = torch.randn(2, 4, 63, 63).cuda().requires_grad_()
+@pytest.mark.parametrize('dim_head', [15, 31, 63])
+def test_grad_equal(causal, dim_head):
+    q = torch.randn(2, 4, 63, dim_head).cuda().requires_grad_()
+    k = torch.randn(2, 4, 63, dim_head).cuda().requires_grad_()
+    v = torch.randn(2, 4, 63, dim_head).cuda().requires_grad_()
 
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal)
     plain_output.sum().backward()
