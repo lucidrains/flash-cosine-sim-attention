@@ -4,6 +4,20 @@
 
 #include <torch/extension.h>
 
+// error handler
+// from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
+
+#define CHECK_LAST_CUDA_ERROR() check(__FILE__, __LINE__)
+void check(const char* file, const int line)
+{
+    cudaError_t err = cudaGetLastError();
+
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA Error at: " << file << ":" << line << std::endl;
+        std::cerr << cudaGetErrorString(err) << std::endl;
+    }
+}
+
 // type alias
 
 template <typename scalar_t, int dims>
@@ -15,11 +29,22 @@ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
 
-int next_pow_2(int n) {
+__device__ int next_pow_2(int n) {
     int i = 1;
     while(i < n)
         i *= 2;
     return i;
+}
+
+__device__ void warp_reduce(volatile float* sm, int tid, int max) {
+    if ((tid + 32) < max)
+        sm[tid] += sm[tid + 32];
+
+    sm[tid] += sm[tid + 16];
+    sm[tid] += sm[tid + 8];
+    sm[tid] += sm[tid + 4];
+    sm[tid] += sm[tid + 2];
+    sm[tid] += sm[tid + 1];
 }
 
 // forward kernel
@@ -205,16 +230,29 @@ __global__ void backward_calculate_do_scaled(
 
     __syncthreads();
 
-    // worst sum reduce
+    // better sum reduce
+
+    const int warp_size = 32;
+    const int start_sum_reduce_stride = next_pow_2(v_dim) / 2;
+    const bool need_final_warp_reduce = start_sum_reduce_stride >= warp_size;
+
+    for (int s = start_sum_reduce_stride; s > warp_size; s>>=1) {
+
+        if ((dim_idx + s) < v_dim)
+            sm_do_scaled[dim_idx] += sm_do_scaled[dim_idx + s];
+
+        __syncthreads();
+    }
+
+    if (need_final_warp_reduce) {
+        if (dim_idx < warp_size) {
+            warp_reduce(sm_do_scaled, dim_idx, v_dim);
+        }
+        __syncthreads();
+    }
 
     if (dim_idx == 0) {
-        float tmp = 0;
-
-        for (int i = 0; i < v_dim; i++) {
-            tmp += sm_do_scaled[i];
-        }
-
-        do_scaled_[seq_idx] = tmp;
+        do_scaled_[seq_idx] = sm_do_scaled[0];
     }
 }
 
@@ -479,12 +517,7 @@ void flash_cosine_sim_attention_forward(
 
     // handle error
 
-    cudaError_t error = cudaGetLastError();
-
-    if(error != cudaSuccess) {
-        printf("CUDA error: %s\n", cudaGetErrorString(error));
-        exit(-1);
-    }
+    CHECK_LAST_CUDA_ERROR();
 
     return;
 }
@@ -562,12 +595,7 @@ void flash_cosine_sim_attention_backward(
 
     // handle error
 
-    cudaError_t error = cudaGetLastError();
-
-    if(error != cudaSuccess) {
-        printf("CUDA error: %s\n", cudaGetErrorString(error));
-        exit(-1);
-    }
+    CHECK_LAST_CUDA_ERROR();
 
     return;
 }
