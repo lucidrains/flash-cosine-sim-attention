@@ -250,9 +250,7 @@ __global__ void backward_calculate_do_scaled(
 
     // better sum reduce
 
-    const int start_sum_reduce_stride = next_pow_2(v_dim) / 2;
-
-    for (int s = start_sum_reduce_stride; s > warp_size; s>>=1) {
+    for (int s = next_pow_2(v_dim) / 2; s > warp_size; s>>=1) {
 
         if ((dim_idx + s) < v_dim)
             sm_do_scaled[dim_idx] += sm_do_scaled[dim_idx + s];
