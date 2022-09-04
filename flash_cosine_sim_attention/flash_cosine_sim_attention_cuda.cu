@@ -328,7 +328,7 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dq,
           PackedAccessor<scalar_t, 4> dk,
           PackedAccessor<scalar_t, 4> dv,
-          PackedAccessor<scalar_t, 4> d_attn_bias,
+          PackedAccessor<scalar_t, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 3> do_scaled,
     const PackedAccessor<scalar_t, 3> l,
@@ -363,7 +363,7 @@ __global__ void backward_kernel(
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
-    auto ds_ = d_attn_bias[batch_idx][head_idx];
+    auto ds_ = d_attn_bias[head_idx];
     auto do_scaled_ = do_scaled[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto do_ = d_out[batch_idx][head_idx];
@@ -492,7 +492,7 @@ __global__ void backward_kernel(
                 dS = attn * (dp - D);
 
                 if (has_attn_bias) {
-                    ds_[global_row][global_col] = dS;
+                    atomicAdd((float*) &ds_[global_row][global_col], dS);
                 }
             }
 
@@ -612,7 +612,7 @@ void flash_cosine_sim_attention_backward(
             dq.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dk.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            d_attn_bias.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
+            d_attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
             do_scaled.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
