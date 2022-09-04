@@ -60,6 +60,7 @@ __global__ void forward_kernel(
           PackedAccessor<scalar_t, 3> l,
     const float scale,
     const bool causal,
+    const bool has_attn_bias,
     const int q_block_size,
     const int k_block_size
 ) {
@@ -91,7 +92,6 @@ __global__ void forward_kernel(
 
     // handle attention bias
 
-    const bool has_attn_bias = attn_bias.size(1) > 0 && attn_bias.size(2) > 0;
     auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // shared memory
@@ -227,6 +227,7 @@ void flash_cosine_sim_attention_forward(
     const int heads = q.size(1);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
+    const bool has_attn_bias = !!attn_bias.numel();
 
     const dim3 threads_per_block(q_block_size, k_block_size);
     const dim3 blocks(batch, heads);
@@ -246,6 +247,7 @@ void flash_cosine_sim_attention_forward(
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
             causal,
+            has_attn_bias,
             q_block_size,
             k_block_size
         );
@@ -332,6 +334,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 3> l,
     const float scale,
     const bool causal,
+    const bool has_attn_bias,
     const int q_block_size,
     const int k_block_size
 ) {
@@ -368,7 +371,6 @@ __global__ void backward_kernel(
 
     // handle attention bias
 
-    const bool has_attn_bias = attn_bias.size(1) > 0 && attn_bias.size(2) > 0;
     auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // some variables
@@ -577,6 +579,7 @@ void flash_cosine_sim_attention_backward(
     const int seq   = dq.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
+    const bool has_attn_bias = !!attn_bias.numel();
 
     // setup backwards preprocess call
 
@@ -615,6 +618,7 @@ void flash_cosine_sim_attention_backward(
             l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
             scale,
             causal,
+            has_attn_bias,
             q_block_size,
             k_block_size
         );
