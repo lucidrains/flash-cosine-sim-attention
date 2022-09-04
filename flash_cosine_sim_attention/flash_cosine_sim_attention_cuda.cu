@@ -22,6 +22,8 @@ void check(const char* file, const int line)
     }
 }
 
+#define ACCESSOR(x, n, type) x.packed_accessor32<type, n, torch::RestrictPtrTraits>()
+
 // type alias
 
 template <typename scalar_t, int dims>
@@ -238,13 +240,13 @@ void flash_cosine_sim_attention_forward(
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
-            q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
-            attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+            ACCESSOR(q, 4, scalar_t),
+            ACCESSOR(k, 4, scalar_t),
+            ACCESSOR(v, 4, scalar_t),
+            ACCESSOR(mask, 2, bool),
+            ACCESSOR(attn_bias, 3, scalar_t),
+            ACCESSOR(o, 4, scalar_t),
+            ACCESSOR(l, 3, scalar_t),
             scale,
             causal,
             has_attn_bias,
@@ -598,24 +600,24 @@ void flash_cosine_sim_attention_backward(
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
         backward_calculate_do_scaled<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
-            d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            o.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            do_scaled.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>()
+            ACCESSOR(d_out, 4, scalar_t),
+            ACCESSOR(o, 4, scalar_t),
+            ACCESSOR(do_scaled, 3, scalar_t)
         );
 
         backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
-            q.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            k.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            v.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            mask.packed_accessor32<bool, 2, torch::RestrictPtrTraits>(),
-            attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            dq.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            dk.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            dv.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            d_attn_bias.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            d_out.packed_accessor32<scalar_t, 4, torch::RestrictPtrTraits>(),
-            do_scaled.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            l.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
+            ACCESSOR(q, 4, scalar_t),
+            ACCESSOR(k, 4, scalar_t),
+            ACCESSOR(v, 4, scalar_t),
+            ACCESSOR(mask, 2, bool),
+            ACCESSOR(attn_bias, 3, scalar_t),
+            ACCESSOR(dq, 4, scalar_t),
+            ACCESSOR(dk, 4, scalar_t),
+            ACCESSOR(dv, 4, scalar_t),
+            ACCESSOR(d_attn_bias, 3, scalar_t),
+            ACCESSOR(d_out, 4, scalar_t),
+            ACCESSOR(do_scaled, 3, scalar_t),
+            ACCESSOR(l, 3, scalar_t),
             scale,
             causal,
             has_attn_bias,
