@@ -512,8 +512,12 @@ __global__ void backward_kernel(
 
             // write dq out to hbm
 
-            if (col_tile_idx == 0 && should_calculate_row) {
-                for (int d = 0; d < k_dim; d++) {
+            if (should_calculate_row) {
+                for (
+                    int d = col_tile_idx;
+                    d < k_dim;
+                    d += k_block_size
+                ) {
                     dq_[global_row][d] = sm_dq[sm_q_offset + d];
                 }
             }
