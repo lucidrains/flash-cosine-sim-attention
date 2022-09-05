@@ -1,5 +1,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cassert>
 #include <c10/cuda/CUDAGuard.h>
 
 #include <torch/extension.h>
@@ -49,6 +50,10 @@ __device__ void warp_reduce(volatile float* sm, int tid, int max) {
     }
 }
 
+bool divisible_by(int num, int denom) {
+    return (num % denom) == 0;
+}
+
 // forward kernel
 
 template <typename scalar_t>
@@ -66,8 +71,11 @@ __global__ void forward_kernel(
     const int q_block_size,
     const int k_block_size
 ) {
-    const int batch_idx = blockIdx.x;
-    const int head_idx = blockIdx.y;
+    const int batch = q.size(0);
+    const int head = q.size(1);
+
+    const int batch_idx = blockIdx.x / head;
+    const int head_idx = blockIdx.x % head;
 
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
@@ -76,6 +84,13 @@ __global__ void forward_kernel(
 
     const int num_col_tiles = cdiv(k_seq_len, k_block_size);
     const int num_row_tiles = cdiv(q_seq_len, q_block_size);
+
+    const int tile_size = blockDim.x;
+    const int q_tiles = q_block_size / tile_size;
+    const int k_tiles = k_block_size / tile_size;
+
+    const int row_tiles_idx = blockIdx.y / k_tiles;
+    const int col_tiles_idx = blockIdx.y % k_tiles;
 
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
@@ -101,9 +116,9 @@ __global__ void forward_kernel(
     extern __shared__ float _shared_mem[];
 
     float* sm_q = (float*) &_shared_mem;
-    float* sm_k = (float*) &sm_q[q_block_size * k_dim];
-    float* sm_v = (float*) &sm_k[k_block_size * k_dim];
-    float* sm_o = (float*) &sm_v[k_block_size * v_dim];
+    float* sm_k = (float*) &sm_q[tile_size * k_dim];
+    float* sm_v = (float*) &sm_k[tile_size * k_dim];
+    float* sm_o = (float*) &sm_v[tile_size * v_dim];
 
     // some variable
 
@@ -115,14 +130,14 @@ __global__ void forward_kernel(
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
-        global_col = col_tiles_offset + col_tile_idx;
+        global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
         if (should_calculate_col) {
             for (
                 int d = row_tile_idx;
                 d < k_dim;
-                d += q_block_size
+                d += tile_size
             ) {
                 sm_k[sm_k_offset + d] = k_[global_col][d];
             }
@@ -130,7 +145,7 @@ __global__ void forward_kernel(
             for (
                 int d = row_tile_idx;
                 d < v_dim;
-                d += q_block_size
+                d += tile_size
             ) {
                 sm_v[sm_v_offset + d] = v_[global_col][d];
             }
@@ -138,7 +153,7 @@ __global__ void forward_kernel(
 
         for (int j = 0; j < num_row_tiles; j++) {
             row_tiles_offset = j * q_block_size;
-            global_row = row_tiles_offset + row_tile_idx;
+            global_row = row_tiles_offset + row_tiles_idx * tile_size + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
             should_calculate_attn = should_calculate_row &&
@@ -150,7 +165,7 @@ __global__ void forward_kernel(
                 for (
                     int d = col_tile_idx;
                     d < k_dim;
-                    d += k_block_size
+                    d += tile_size
                 ) {
                     sm_q[sm_q_offset + d] = q_[global_row][d];
                 }
@@ -158,7 +173,7 @@ __global__ void forward_kernel(
                 for (
                     int d = col_tile_idx;
                     d < v_dim;
-                    d += k_block_size
+                    d += tile_size
                 ) {
                     sm_o[sm_o_offset + d] = 0.;
                 }
@@ -197,7 +212,7 @@ __global__ void forward_kernel(
                 for (
                     int d = col_tile_idx;
                     d < v_dim;
-                    d += k_block_size
+                    d += tile_size
                 ) {
                     atomicAdd((float*) &o_[global_row][d], sm_o[sm_o_offset + d]);
                 }
@@ -221,8 +236,13 @@ void flash_cosine_sim_attention_forward(
     float scale,
     bool causal,
     int q_block_size,
-    int k_block_size
+    int k_block_size,
+    int tile_size
 ) {
+    assert(("tile size needs to be 32 or less", tile_size <= 32));
+    assert(("query block size needs to be divisible by tile size", divisible_by(q_block_size, tile_size)));
+    assert(("key block size needs to be divisible by tile size", divisible_by(k_block_size, tile_size)));
+
     const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
 
     const int batch = q.size(0);
@@ -231,11 +251,11 @@ void flash_cosine_sim_attention_forward(
     const int v_dim = v.size(3);
     const bool has_attn_bias = !!attn_bias.numel();
 
-    const dim3 threads_per_block(q_block_size, k_block_size);
-    const dim3 blocks(batch, heads);
-    const unsigned shared_mem_size = (( q_block_size + k_block_size) * k_dim +  // q, k
-                                        k_block_size * v_dim +                  // v
-                                        q_block_size * v_dim                    // o
+    const dim3 threads_per_block(tile_size, tile_size);
+    const dim3 blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
+
+    const unsigned shared_mem_size = (  tile_size * 2 * k_dim +  // q, k
+                                        tile_size * 2 * v_dim    // o, v
                                       ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
@@ -340,8 +360,12 @@ __global__ void backward_kernel(
     const int q_block_size,
     const int k_block_size
 ) {
-    const int batch_idx = blockIdx.x;
-    const int head_idx = blockIdx.y;
+
+    const int batch = q.size(0);
+    const int head = q.size(1);
+
+    const int batch_idx = blockIdx.x / head;
+    const int head_idx = blockIdx.x % head;
 
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
@@ -350,6 +374,13 @@ __global__ void backward_kernel(
 
     const int num_col_tiles = cdiv(k_seq_len, k_block_size);
     const int num_row_tiles = cdiv(q_seq_len, q_block_size);
+
+    const int tile_size = blockDim.x;
+    const int q_tiles = q_block_size / tile_size;
+    const int k_tiles = k_block_size / tile_size;
+
+    const int row_tiles_idx = blockIdx.y / k_tiles;
+    const int col_tiles_idx = blockIdx.y % k_tiles;
 
     const int row_tile_idx = threadIdx.x;
     const int col_tile_idx = threadIdx.y;
@@ -386,27 +417,27 @@ __global__ void backward_kernel(
     extern __shared__ float _shared_mem[];
 
     float* sm_q = (float*) &_shared_mem;
-    float* sm_k = (float*) &sm_q[q_block_size * k_dim];
-    float* sm_v = (float*) &sm_k[k_block_size * k_dim];
-    float* sm_l = (float*) &sm_v[k_block_size * v_dim];
-    float* sm_do_scaled = (float*) &sm_l[q_block_size];
-    float* sm_do = (float*) &sm_do_scaled[q_block_size];
+    float* sm_k = (float*) &sm_q[tile_size * k_dim];
+    float* sm_v = (float*) &sm_k[tile_size * k_dim];
+    float* sm_l = (float*) &sm_v[tile_size * v_dim];
+    float* sm_do_scaled = (float*) &sm_l[tile_size];
+    float* sm_do = (float*) &sm_do_scaled[tile_size];
 
-    float* sm_dq = (float*) &sm_do[q_block_size * v_dim];
-    float* sm_dk = (float*) &sm_dq[q_block_size * k_dim];
-    float* sm_dv = (float*) &sm_dk[k_block_size * k_dim];
+    float* sm_dq = (float*) &sm_do[tile_size * v_dim];
+    float* sm_dk = (float*) &sm_dq[tile_size * k_dim];
+    float* sm_dv = (float*) &sm_dk[tile_size * k_dim];
 
     // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * k_block_size;
-        global_col = col_tiles_offset + col_tile_idx;
+        global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
         for (
             int d = row_tile_idx;
             d < k_dim;
-            d += q_block_size
+            d += tile_size
         ) {
             sm_k[sm_k_offset + d] = k_[global_col][d];
             sm_dk[sm_k_offset + d] = 0.;            
@@ -415,7 +446,7 @@ __global__ void backward_kernel(
         for (
             int d = row_tile_idx;
             d < v_dim;
-            d += q_block_size
+            d += tile_size
         ) {
             sm_v[sm_v_offset + d] = v_[global_col][d];
             sm_dv[sm_v_offset + d] = 0.;
@@ -423,7 +454,7 @@ __global__ void backward_kernel(
 
         for (int j = 0; j < num_row_tiles; j++) {
             row_tiles_offset = j * q_block_size;
-            global_row = row_tiles_offset + row_tile_idx;
+            global_row = row_tiles_offset + row_tiles_idx * tile_size + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
             should_calculate_attn = should_calculate_row &&
@@ -434,7 +465,7 @@ __global__ void backward_kernel(
             for (
                 int d = col_tile_idx;
                 d < k_dim;
-                d += k_block_size
+                d += tile_size
             ) {
                 sm_q[sm_q_offset + d] = q_[global_row][d];
                 sm_dq[sm_q_offset + d] = 0.;
@@ -443,7 +474,7 @@ __global__ void backward_kernel(
             for (
                 int d = col_tile_idx;
                 d < v_dim;
-                d += k_block_size
+                d += tile_size
             ) {
                 sm_do[sm_o_offset + d] = do_[global_row][d];
             }
@@ -520,7 +551,7 @@ __global__ void backward_kernel(
                 for (
                     int d = col_tile_idx;
                     d < k_dim;
-                    d += k_block_size
+                    d += tile_size
                 ) {
                     atomicAdd((float*) &dq_[global_row][d], sm_dq[sm_q_offset + d]);
                 }
@@ -535,17 +566,17 @@ __global__ void backward_kernel(
             for (
                 int d = row_tile_idx;
                 d < k_dim;
-                d += q_block_size
+                d += tile_size
             ) {
-                dk_[global_col][d] = sm_dk[sm_k_offset + d];
+                atomicAdd((float*) &dk_[global_col][d], sm_dk[sm_k_offset + d]);
             }
 
             for (
                 int d = row_tile_idx;
                 d < v_dim;
-                d += q_block_size
+                d += tile_size
             ) {
-                dv_[global_col][d] = sm_dv[sm_v_offset + d];
+                atomicAdd((float*) &dv_[global_col][d], sm_dv[sm_v_offset + d]);
             }
         }
 
@@ -572,12 +603,18 @@ void flash_cosine_sim_attention_backward(
     float scale,
     bool causal,
     int q_block_size,
-    int k_block_size
+    int k_block_size,
+    int tile_size
 ) {
+    assert(("tile size needs to be 32 or less", tile_size <= 32));
+    assert(("query block size needs to be divisible by tile size", divisible_by(q_block_size, tile_size)));
+    assert(("key block size needs to be divisible by tile size", divisible_by(k_block_size, tile_size)));
+
     const at::cuda::OptionalCUDAGuard device_guard(device_of(dq));
 
     const int batch = dq.size(0);
     const int heads = dq.size(1);
+
     const int seq   = dq.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
@@ -590,12 +627,12 @@ void flash_cosine_sim_attention_backward(
 
     const unsigned backwards_preprocess_shared_mem_size = v_dim * sizeof(float);
 
-    const dim3 backwards_threads_per_block(q_block_size, k_block_size);
-    const dim3 backwards_blocks(batch, heads);
-    const unsigned backwards_shared_mem_size = (( q_block_size + k_block_size) * k_dim * 2 +   // q, k, dq, dk
-                                                  k_block_size * v_dim * 2 +                   // v, dv
-                                                  q_block_size * v_dim +                       // do
-                                                  q_block_size                                 // l, do_scaled
+    const dim3 backwards_threads_per_block(tile_size, tile_size);
+    const dim3 backwards_blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
+
+    const unsigned backwards_shared_mem_size = (  tile_size * 4 * k_dim +      // q, k, dq, dk
+                                                  tile_size * v_dim * 3 +      // v, dv, do
+                                                  tile_size * 2                // l
                                                 ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
