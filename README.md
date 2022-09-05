@@ -1,5 +1,33 @@
 ## Flash Cosine Similarity Attention (wip)
 
+
+## Install
+
+```bash
+$ pip install flash-cosine-sim-attention
+```
+
+## Usage
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(1, 8, 1024, 64).cuda()
+k = torch.randn(1, 8, 1024, 64).cuda()
+v = torch.randn(1, 8, 1024, 64).cuda()
+
+out = flash_cosine_sim_attention(q, k, v)  # (1, 8, 1024, 64)
+```
+
+## Appreciation
+
+- <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
+
+- <a href="https://github.com/ahennequ">Arthur Hennequin</a> for his CUDA expertise and advisory role in the creation of this kernel
+
+## Description
+
 Implementation of fused cosine similarity attention in the same style as <a href="https://arxiv.org/abs/2205.14135">Flash Attention</a>. The observation is that by adopting l2 normalized queries and keys, you no longer need to keep track of the row maximums for numerical stability. This greatly simplifies the flash attention algorithm, assuming cosine similarity attention comes at no generalization cost.
 
 In other words, potentially stable, fast, memory efficient, and longer context attention with no downsides.

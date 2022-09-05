@@ -6,7 +6,7 @@ assert torch.cuda.is_available(), 'cuda must be available'
 
 # helper functions
 
-def allclose(a, b, atol = 1e-5):
+def allclose(a, b, atol = 1e-3):
     diff = (a - b).abs().amax()
     return diff <= atol
 

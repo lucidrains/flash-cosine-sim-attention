@@ -177,7 +177,9 @@ __global__ void forward_kernel(
             if (should_calculate_attn) {
                 float attn = 0;
                 for (int d = 0; d < k_dim; d++) {
-                    attn += sm_q[sm_q_offset + d] * sm_k[sm_k_offset + d];
+                    // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
+                    int dmod = (d + (threadIdx.x % warp_size)) % k_dim;
+                    attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
                 }
 
                 attn *= scale;
@@ -464,7 +466,9 @@ __global__ void backward_kernel(
 
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
-                    attn += sm_q[sm_q_offset + d] * sm_k[sm_k_offset + d];
+                    // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
+                    int dmod = (d + (threadIdx.x % warp_size)) % k_dim;
+                    attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
                 }
 
                 attn *= scale;
