@@ -45,8 +45,10 @@ __device__ int next_pow_2(int n) {
 
 __device__ void warp_reduce(volatile float* sm, int tid, int max) {
     for (int s = warp_size; s > 0; s>>=1) {
-        if ((tid + s) < max)
-            sm[tid] += sm[tid + s];
+        if ((tid + s) >= max)
+            continue;
+
+        sm[tid] += sm[tid + s];
     }
 }
 
@@ -118,7 +120,6 @@ __global__ void forward_kernel(
     float* sm_q = (float*) &_shared_mem;
     float* sm_k = (float*) &sm_q[tile_size * k_dim];
     float* sm_v = (float*) &sm_k[tile_size * k_dim];
-    float* sm_o = (float*) &sm_v[tile_size * v_dim];
 
     // some variable
 
@@ -169,14 +170,6 @@ __global__ void forward_kernel(
                 ) {
                     sm_q[sm_q_offset + d] = q_[global_row][d];
                 }
-
-                for (
-                    int d = col_tile_idx;
-                    d < v_dim;
-                    d += tile_size
-                ) {
-                    sm_o[sm_o_offset + d] = 0.;
-                }
             }
 
             __syncthreads();
@@ -202,19 +195,7 @@ __global__ void forward_kernel(
 
                 for (int d = 0; d < v_dim; d++) {
                     exp_weighted_value = attn * sm_v[sm_v_offset + d];
-                    atomicAdd(&sm_o[sm_o_offset + d], exp_weighted_value);
-                }
-            }
-
-            __syncthreads();
-
-            if (should_calculate_row) {
-                for (
-                    int d = col_tile_idx;
-                    d < v_dim;
-                    d += tile_size
-                ) {
-                    atomicAdd((float*) &o_[global_row][d], sm_o[sm_o_offset + d]);
+                    atomicAdd((float*) &o_[global_row][d], exp_weighted_value);
                 }
             }
 
@@ -254,9 +235,7 @@ void flash_cosine_sim_attention_forward(
     const dim3 threads_per_block(tile_size, tile_size);
     const dim3 blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
 
-    const unsigned shared_mem_size = (  tile_size * 2 * k_dim +  // q, k
-                                        tile_size * 2 * v_dim    // o, v
-                                      ) * sizeof(float);
+    const unsigned shared_mem_size = tile_size * (2 * k_dim + v_dim) * sizeof(float); // q, k, v
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
@@ -423,10 +402,6 @@ __global__ void backward_kernel(
     float* sm_do_scaled = (float*) &sm_l[tile_size];
     float* sm_do = (float*) &sm_do_scaled[tile_size];
 
-    float* sm_dq = (float*) &sm_do[tile_size * v_dim];
-    float* sm_dk = (float*) &sm_dq[tile_size * k_dim];
-    float* sm_dv = (float*) &sm_dk[tile_size * k_dim];
-
     // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
@@ -440,7 +415,6 @@ __global__ void backward_kernel(
             d += tile_size
         ) {
             sm_k[sm_k_offset + d] = k_[global_col][d];
-            sm_dk[sm_k_offset + d] = 0.;            
         }
 
         for (
@@ -449,7 +423,6 @@ __global__ void backward_kernel(
             d += tile_size
         ) {
             sm_v[sm_v_offset + d] = v_[global_col][d];
-            sm_dv[sm_v_offset + d] = 0.;
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
@@ -468,7 +441,6 @@ __global__ void backward_kernel(
                 d += tile_size
             ) {
                 sm_q[sm_q_offset + d] = q_[global_row][d];
-                sm_dq[sm_q_offset + d] = 0.;
             }
 
             for (
@@ -487,6 +459,7 @@ __global__ void backward_kernel(
             __syncthreads();
 
             float attn = 0;
+            float row_sum = 0;
             float dp = 0;
 
             if (should_calculate_attn) {
@@ -502,12 +475,16 @@ __global__ void backward_kernel(
 
                 attn -= scale;
                 attn = __expf(attn);
-                attn /= max(sm_l[row_tile_idx], 1e-10);
+
+                row_sum = sm_l[row_tile_idx];
+
+                if (row_sum > 1e-8)
+                    attn /= row_sum;
 
                 for (int d = 0; d < v_dim; d++) {
                     // naively accumulate dv in shared mem
 
-                    atomicAdd(&sm_dv[sm_v_offset + d], sm_do[sm_o_offset + d] * attn);
+                    atomicAdd((float*) &dv_[global_col][d], sm_do[sm_o_offset + d] * attn);
 
                     // calculate dp
 
@@ -537,50 +514,14 @@ __global__ void backward_kernel(
                 dS *= scale;
 
                 for (int d = 0; d < k_dim; d++) {
-                    atomicAdd(&sm_dq[sm_q_offset + d], dS * sm_k[sm_k_offset + d]);
+                    atomicAdd((float*) &dq_[global_row][d], dS * sm_k[sm_k_offset + d]);
 
-                    atomicAdd(&sm_dk[sm_k_offset + d], dS * sm_q[sm_q_offset + d]);
-                }
-            }
-
-            __syncthreads();
-
-            // write dq out to hbm
-
-            if (should_calculate_row) {
-                for (
-                    int d = col_tile_idx;
-                    d < k_dim;
-                    d += tile_size
-                ) {
-                    atomicAdd((float*) &dq_[global_row][d], sm_dq[sm_q_offset + d]);
+                    atomicAdd((float*) &dk_[global_col][d], dS * sm_q[sm_q_offset + d]);
                 }
             }
 
             __syncthreads();
         }
-
-        // write dk and dv out to hbm
-
-        if (should_calculate_col) {
-            for (
-                int d = row_tile_idx;
-                d < k_dim;
-                d += tile_size
-            ) {
-                atomicAdd((float*) &dk_[global_col][d], sm_dk[sm_k_offset + d]);
-            }
-
-            for (
-                int d = row_tile_idx;
-                d < v_dim;
-                d += tile_size
-            ) {
-                atomicAdd((float*) &dv_[global_col][d], sm_dv[sm_v_offset + d]);
-            }
-        }
-
-        __syncthreads();
     }
 }
 
@@ -630,9 +571,9 @@ void flash_cosine_sim_attention_backward(
     const dim3 backwards_threads_per_block(tile_size, tile_size);
     const dim3 backwards_blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
 
-    const unsigned backwards_shared_mem_size = (  tile_size * 4 * k_dim +      // q, k, dq, dk
-                                                  tile_size * v_dim * 3 +      // v, dv, do
-                                                  tile_size * 2                // l
+    const unsigned backwards_shared_mem_size = (  tile_size * 2 * k_dim +      // q, k
+                                                  tile_size * v_dim * 2 +      // v, do
+                                                  tile_size * 2                // l, do_scaled
                                                 ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {

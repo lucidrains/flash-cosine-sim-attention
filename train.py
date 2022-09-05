@@ -26,7 +26,7 @@ LEARNING_RATE = 2e-4
 VALIDATE_EVERY  = 100
 GENERATE_EVERY  = 500
 GENERATE_LENGTH = 512
-SEQ_LEN = 1024
+SEQ_LEN = 256
 
 # helpers
 
@@ -110,8 +110,8 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
         model.eval()
         inp = random.choice(val_dataset)[:-1]
         prime = decode_tokens(inp)
-        print(f'%s \n\n %s', (prime, '*' * 100))
+        print(f"\n\n {prime} \n\n {'-' * 80} \n")
 
         sample = model.generate(inp[None, ...], GENERATE_LENGTH)
         output_str = decode_tokens(sample[0])
-        print(output_str)
+        print(output_str + "\n\n")
