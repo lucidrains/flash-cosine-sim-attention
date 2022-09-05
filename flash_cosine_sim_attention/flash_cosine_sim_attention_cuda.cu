@@ -482,7 +482,7 @@ __global__ void backward_kernel(
                     attn /= row_sum;
 
                 for (int d = 0; d < v_dim; d++) {
-                    // naively accumulate dv in shared mem
+                    // accumulate dv to global mem
 
                     atomicAdd((float*) &dv_[global_col][d], sm_do[sm_o_offset + d] * attn);
 
@@ -508,7 +508,7 @@ __global__ void backward_kernel(
 
             __syncthreads();
 
-            // calculate dq and dk and write to shared memoery
+            // accumulate dq and dk to global mem
 
             if (should_calculate_attn) {
                 dS *= scale;
