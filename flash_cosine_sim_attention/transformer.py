@@ -1,4 +1,5 @@
 import torch
+from functools import partial
 from torch import nn
 import torch.nn.functional as F
 
@@ -52,14 +53,15 @@ class Attention(nn.Module):
         dim_head = 64,
         heads = 8,
         scale = 8,
-        use_cuda_kernel = False
+        use_cuda_kernel = False,
+        **kwargs
     ):
         super().__init__()
         inner_dim = dim_head * heads
         self.scale = scale
-        self.use_cuda_kernel = use_cuda_kernel
-
         self.heads = heads
+
+        self.attn_fn = plain_cosine_sim_attention if not use_cuda_kernel else partial(flash_cosine_sim_attention, **kwargs)
 
         self.to_q = nn.Linear(dim, inner_dim, bias = False)
         self.to_k = nn.Linear(dim, inner_dim, bias = False)
@@ -72,9 +74,7 @@ class Attention(nn.Module):
         q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
-        attn_fn = plain_cosine_sim_attention if not self.use_cuda_kernel else flash_cosine_sim_attention
-
-        o = attn_fn(q, k, v, causal = True, scale = scale)
+        o = self.attn_fn(q, k, v, causal = True, scale = scale)
 
         o = rearrange(o, 'b h n d -> b n (h d)')
         return self.to_out(o)
@@ -92,7 +92,8 @@ class CosineSimCausalTransformer(nn.Module):
         attn_scale = 8,
         heads = 8,
         dim_head = 64,
-        use_cuda_kernel = False
+        use_cuda_kernel = False,
+        **kwargs
     ):
         super().__init__()
         self.max_seq_len = max_seq_len
@@ -105,7 +106,7 @@ class CosineSimCausalTransformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale),
+                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale, **kwargs),
                 nn.LayerNorm(dim),
                 FeedForward(dim),
                 nn.LayerNorm(dim),
