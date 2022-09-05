@@ -160,7 +160,7 @@ __global__ void forward_kernel(
                     d < v_dim;
                     d += k_block_size
                 ) {
-                    sm_o[sm_o_offset + d] = o_[global_row][d];
+                    sm_o[sm_o_offset + d] = 0.;
                 }
             }
 
@@ -199,7 +199,7 @@ __global__ void forward_kernel(
                     d < v_dim;
                     d += k_block_size
                 ) {
-                    o_[global_row][d] = sm_o[sm_o_offset + d];
+                    atomicAdd((float*) &o_[global_row][d], sm_o[sm_o_offset + d]);
                 }
             }
 
@@ -437,7 +437,7 @@ __global__ void backward_kernel(
                 d += k_block_size
             ) {
                 sm_q[sm_q_offset + d] = q_[global_row][d];
-                sm_dq[sm_q_offset + d] = dq_[global_row][d];
+                sm_dq[sm_q_offset + d] = 0.;
             }
 
             for (
@@ -522,7 +522,7 @@ __global__ void backward_kernel(
                     d < k_dim;
                     d += k_block_size
                 ) {
-                    dq_[global_row][d] = sm_dq[sm_q_offset + d];
+                    atomicAdd((float*) &dq_[global_row][d], sm_dq[sm_q_offset + d]);
                 }
             }
 
