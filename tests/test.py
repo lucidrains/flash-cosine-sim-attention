@@ -47,20 +47,30 @@ def test_grad_equal(
     v = torch.randn(2, 4, 63, dim_head).cuda().requires_grad_()
 
     attn_mask = torch.randint(0, 2, (2, 63), dtype = torch.bool).cuda() if mask else None
-    bias = torch.randn(4, 63, 63).requires_grad_().cuda() if attn_bias else None
+    bias = torch.randn(4, 63, 63).cuda().requires_grad_() if attn_bias else None
 
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     plain_output.sum().backward()
 
     dq, dk, dv = q.grad, k.grad, v.grad
 
+    db = bias.grad if attn_bias else None
+
     q.grad, k.grad, v.grad = None, None, None
+
+    if attn_bias:
+        bias.grad = None
 
     flash_output = flash_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     flash_output.sum().backward()
 
     fdq, fdk, fdv = q.grad, k.grad, v.grad
 
+    fdb = bias.grad if attn_bias else None
+
     assert allclose(dq, fdq)
     assert allclose(dk, fdk)
     assert allclose(dv, fdv)
+
+    if attn_bias:
+        assert allclose(db, fdb)
