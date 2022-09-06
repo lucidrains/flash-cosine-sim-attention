@@ -142,7 +142,7 @@ def flash_cosine_sim_attention(
     q_block_size = 64,
     k_block_size = 64,
     l2norm_qk = True,
-    tile_size = 32,
+    tile_size = 16,
     backward_tile_size = 16
 ) -> TensorType['b', 'h', 'i', 'd']:
 
