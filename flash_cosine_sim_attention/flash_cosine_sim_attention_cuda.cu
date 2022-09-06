@@ -32,11 +32,15 @@ using PackedAccessor = torch::PackedTensorAccessor32<scalar_t, dims, torch::Rest
 
 // helper functions
 
-__device__ int cdiv(int numer, int denom) {
+__host__ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
 
-__device__ int next_pow_2(int n) {
+__host__ __device__ int next_multiple_of(int num, int multiple_of) {
+    return cdiv(num, multiple_of) * multiple_of;
+}
+
+__host__ __device__ int next_pow_2(int n) {
     int i = 1;
     while(i < n)
         i *= 2;
@@ -284,6 +288,13 @@ __global__ void backward_calculate_do_scaled(
     const int seq_idx = blockIdx.y;
     const int dim_idx = threadIdx.x;
 
+    const int warp_id = threadIdx.x / warp_size;
+    const int lane = threadIdx.x % warp_size;
+
+    const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
+
+    float val = 0.0f;
+
     extern __shared__ float _shared_mem_preprocess[];
 
     float* sm_do_scaled = (float*) &_shared_mem_preprocess;
@@ -294,26 +305,34 @@ __global__ void backward_calculate_do_scaled(
 
     // load into shared memory
 
-    sm_do_scaled[dim_idx] = do_[dim_idx] * o_[dim_idx];
+    if (dim_idx < v_dim)
+        val = do_[dim_idx] * o_[dim_idx];
 
-    __syncthreads();
+    // warp shuffle reduce
 
-    // better sum reduce
-
-    for (int s = next_pow_2(v_dim) / 2; s > warp_size; s>>=1) {
-
-        if ((dim_idx + s) < v_dim)
-            sm_do_scaled[dim_idx] += sm_do_scaled[dim_idx + s];
-
-        __syncthreads();
+    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(mask, val, offset);
     }
 
-    warp_reduce(sm_do_scaled, dim_idx, v_dim);
+    if (lane == 0)
+        sm_do_scaled[warp_id] = val;
 
     __syncthreads();
 
-    if (dim_idx == 0) {
-        do_scaled_[seq_idx] = sm_do_scaled[0];
+    if (warp_id == 0) {
+        if (dim_idx < (blockDim.x / warp_size)) {
+            val = sm_do_scaled[lane];
+        } else{
+            val = 0;
+        }
+
+        for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+            val += __shfl_down_sync(mask, val, offset);
+        }
+
+        if (dim_idx == 0) {
+            do_scaled_[seq_idx] = val;
+        }
     }
 }
 
@@ -565,10 +584,13 @@ void flash_cosine_sim_attention_backward(
 
     // setup backwards preprocess call
 
-    const dim3 backwards_preprocess_threads_per_block(v_dim);
+    const dim3 backwards_preprocess_threads_per_block(next_multiple_of(v_dim, 32));
+
     const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
-    const unsigned backwards_preprocess_shared_mem_size = v_dim * sizeof(float);
+    const unsigned backwards_preprocess_shared_mem_size = cdiv(v_dim, 32) * sizeof(float);
+
+    // setup backwards call
 
     const dim3 backwards_threads_per_block(tile_size, tile_size);
     const dim3 backwards_blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
