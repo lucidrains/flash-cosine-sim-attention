@@ -561,7 +561,7 @@ void flash_cosine_sim_attention_backward(
     const int seq   = dq.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
-    const bool has_attn_bias = !!attn_bias.numel();
+    const bool has_attn_bias = !!d_attn_bias.numel();
 
     // setup backwards preprocess call
 
