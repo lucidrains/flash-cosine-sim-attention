@@ -143,7 +143,7 @@ __global__ void forward_kernel(
             sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
         }
 
-        float row_sum = 0;
+        float acc_attn = 0;
 
         for (int i = 0; i < num_col_tiles; i++) {
             col_tiles_offset = i * col_tile_size;
@@ -206,45 +206,42 @@ __global__ void forward_kernel(
 
             __syncthreads();
 
-            // accumulate row sums in registers
-            // first use warp shuffle reduce to accumulate in row_sum_tiles
-            // then accumulate to row_sum in the outer loop, as we are iterating over all key/ values in inner loop
+            acc_attn += attn;
 
-            const unsigned shfl_mask = __ballot_sync(0xFFFFFFFFU, should_calculate_attn);
+        }
 
-            float row_sum_tiles = attn;
+        // reduce accumulated attention from inner loop
 
-            for (int offset = 16; offset > 0; offset >>= 1) {
-                row_sum_tiles += __shfl_down_sync(shfl_mask, row_sum_tiles, offset);
+        const unsigned shfl_mask = __ballot_sync(0xFFFFFFFFU, should_calculate_row);
+
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            acc_attn += __shfl_down_sync(shfl_mask, acc_attn, offset);
+        }
+
+        if (lane_id == 0 && warp_id_per_row > 0)
+            sm_l[row_tile_idx * (col_num_warps - 1)  + (warp_id_per_row - 1)] = acc_attn;
+
+        __syncthreads();
+
+        if (warp_id_per_row == 0) {
+            // if not the first column, and column is less than the number of warps per row
+            // then get from shared memory, set everything else but the first column to 0.
+
+            if (col_tile_idx > 0 && col_tile_idx < col_num_warps) {
+                acc_attn = sm_l[row_tile_idx * col_num_warps + (col_tile_idx - 1)];
+            } else if (col_tile_idx != 0) {
+                acc_attn = 0;
             }
 
-            if (lane_id == 0 && warp_id_per_row > 0)
-                sm_l[row_tile_idx * (col_num_warps - 1)  + (warp_id_per_row - 1)] = row_sum_tiles;
-
-            __syncthreads();
-
-            if (warp_id_per_row == 0) {
-                // if not the first column, and column is less than the number of warps per row
-                // then get from shared memory, set everything else but the first column to 0.
-
-                if (col_tile_idx > 0 && col_tile_idx < col_num_warps) {
-                    row_sum_tiles = sm_l[row_tile_idx * col_num_warps + (col_tile_idx - 1)];
-                } else if (col_tile_idx != 0) {
-                    row_sum_tiles = 0;
-                }
-
-                for (int offset = 16; offset > 0; offset >>= 1) {
-                    row_sum_tiles += __shfl_down_sync(shfl_mask, row_sum_tiles, offset);
-                }
-
-                row_sum += row_sum_tiles;
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                acc_attn += __shfl_down_sync(shfl_mask, acc_attn, offset);
             }
         }
 
         // write row sum (accumulated by thread of first column per row) to global memory
 
         if (should_calculate_row && col_tile_idx == 0)
-            l_[global_row] = row_sum;
+            l_[global_row] = acc_attn;
     }
 }
 
