@@ -65,7 +65,7 @@ for batch, heads, seq, dim in permutations:
         q,
         k,
         v,
-        row_tile_size = 16,
+        row_tile_size = 32,
         col_tile_size = 32,
     )
 

@@ -95,6 +95,10 @@ __global__ void forward_kernel(
     const int col_tile_idx = threadIdx.x;
     const int row_tile_idx = threadIdx.y;
 
+    const int lane_id = threadIdx.x % 32;
+    const int col_num_warps = col_tile_size / 32;
+    const int warp_id_per_row = col_tile_idx / 32;
+
     const int sm_q_offset = row_tile_idx * k_dim;
     const int sm_k_offset = col_tile_idx * k_dim;
     const int sm_v_offset = col_tile_idx * v_dim;
@@ -118,6 +122,7 @@ __global__ void forward_kernel(
     float* sm_q = (float*) &_shared_mem;
     float* sm_k = (float*) &sm_q[row_tile_size * k_dim];
     float* sm_v = (float*) &sm_k[col_tile_size * k_dim];
+    float* sm_l = (float*) &sm_k[col_tile_size * v_dim];
 
     // some variable
 
@@ -137,6 +142,8 @@ __global__ void forward_kernel(
         ) {
             sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
         }
+
+        float row_sum = 0;
 
         for (int i = 0; i < num_col_tiles; i++) {
             col_tiles_offset = i * col_tile_size;
@@ -171,8 +178,9 @@ __global__ void forward_kernel(
                                     ( !causal ||
                                       (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
+            float attn = 0;
+
             if (should_calculate_attn) {
-                float attn = 0;
                 for (int d = 0; d < k_dim; d++) {
                     // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
                     int dmod = (d + (threadIdx.x % 32)) % k_dim;
@@ -188,8 +196,6 @@ __global__ void forward_kernel(
                 attn -= scale;
                 attn = __expf(attn);
 
-                atomicAdd((float*) &l_[global_row], attn);
-
                 float exp_weighted_value;
 
                 for (int d = 0; d < v_dim; d++) {
@@ -199,7 +205,46 @@ __global__ void forward_kernel(
             }
 
             __syncthreads();
+
+            // accumulate row sums in registers
+            // first use warp shuffle reduce to accumulate in row_sum_tiles
+            // then accumulate to row_sum in the outer loop, as we are iterating over all key/ values in inner loop
+
+            const unsigned shfl_mask = __ballot_sync(0xFFFFFFFFU, should_calculate_attn);
+
+            float row_sum_tiles = attn;
+
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                row_sum_tiles += __shfl_down_sync(shfl_mask, row_sum_tiles, offset);
+            }
+
+            if (lane_id == 0 && warp_id_per_row > 0)
+                sm_l[row_tile_idx * (col_num_warps - 1)  + (warp_id_per_row - 1)] = row_sum_tiles;
+
+            __syncthreads();
+
+            if (warp_id_per_row == 0) {
+                // if not the first column, and column is less than the number of warps per row
+                // then get from shared memory, set everything else but the first column to 0.
+
+                if (col_tile_idx > 0 && col_tile_idx < col_num_warps) {
+                    row_sum_tiles = sm_l[row_tile_idx * col_num_warps + (col_tile_idx - 1)];
+                } else if (col_tile_idx != 0) {
+                    row_sum_tiles = 0;
+                }
+
+                for (int offset = 16; offset > 0; offset >>= 1) {
+                    row_sum_tiles += __shfl_down_sync(shfl_mask, row_sum_tiles, offset);
+                }
+
+                row_sum += row_sum_tiles;
+            }
         }
+
+        // write row sum (accumulated by thread of first column per row) to global memory
+
+        if (should_calculate_row && col_tile_idx == 0)
+            l_[global_row] = row_sum;
     }
 }
 
@@ -231,7 +276,12 @@ void flash_cosine_sim_attention_forward(
     const dim3 blocks(batch * heads, row_tiles * col_tiles);
     const dim3 threads_per_block(col_tile_size, row_tile_size);
 
-    const unsigned shared_mem_size = (row_tile_size * (2 * k_dim + v_dim) + col_tile_size * (2 * k_dim + v_dim)) * sizeof(float); // q, k, v
+    const unsigned shared_mem_size = (
+                                        row_tile_size * k_dim +                       // q
+                                        col_tile_size * k_dim +                       // k
+                                        col_tile_size * v_dim +                       // v
+                                        ((col_tile_size / 32) - 1) * row_tile_size    // l per (warps - 1)
+                                     ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
