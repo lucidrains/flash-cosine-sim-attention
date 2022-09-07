@@ -89,15 +89,14 @@ __global__ void forward_kernel(
     const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
     const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
-    const int tile_size = blockDim.x;
     const int q_tiles = row_tiles;
     const int k_tiles = col_tiles;
 
     const int row_tiles_idx = blockIdx.y / k_tiles;
     const int col_tiles_idx = blockIdx.y % k_tiles;
 
-    const int row_tile_idx = threadIdx.x;
-    const int col_tile_idx = threadIdx.y;
+    const int col_tile_idx = threadIdx.x;
+    const int row_tile_idx = threadIdx.y;
 
     const int sm_q_offset = row_tile_idx * k_dim;
     const int sm_k_offset = col_tile_idx * k_dim;
@@ -120,8 +119,8 @@ __global__ void forward_kernel(
     extern __shared__ float _shared_mem[];
 
     float* sm_q = (float*) &_shared_mem;
-    float* sm_k = (float*) &sm_q[tile_size * k_dim];
-    float* sm_v = (float*) &sm_k[tile_size * k_dim];
+    float* sm_k = (float*) &sm_q[row_tile_size * k_dim];
+    float* sm_v = (float*) &sm_k[col_tile_size * k_dim];
 
     // some variable
 
@@ -137,21 +136,21 @@ __global__ void forward_kernel(
         for (
             int d = row_tile_idx;
             d < k_dim;
-            d += tile_size
+            d += row_tile_size
         ) {
-            sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * tile_size + col_tile_idx][d];
+            sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
         }
 
         for (int i = 0; i < num_col_tiles; i++) {
             col_tiles_offset = i * col_tile_size;
-            global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
+            global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
             should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
             if (should_calculate_col) {
                 for (
                     int d = row_tile_idx;
                     d < k_dim;
-                    d += tile_size
+                    d += row_tile_size
                 ) {
                     sm_k[sm_k_offset + d] = k_[global_col][d];
                 }
@@ -159,7 +158,7 @@ __global__ void forward_kernel(
                 for (
                     int d = row_tile_idx;
                     d < v_dim;
-                    d += tile_size
+                    d += row_tile_size
                 ) {
                     sm_v[sm_v_offset + d] = v_[global_col][d];
                 }
@@ -167,7 +166,7 @@ __global__ void forward_kernel(
 
             __syncthreads();
 
-            global_row = row_tiles_offset + row_tiles_idx * tile_size + row_tile_idx;
+            global_row = row_tiles_offset + row_tiles_idx * row_tile_size + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
             should_calculate_attn = should_calculate_row &&
@@ -373,15 +372,14 @@ __global__ void backward_kernel(
     const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
     const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
-    const int tile_size = blockDim.x;
-    const int q_tiles = row_tile_size / tile_size;
-    const int k_tiles = col_tile_size / tile_size;
+    const int q_tiles = row_tiles;
+    const int k_tiles = col_tiles;
 
     const int row_tiles_idx = blockIdx.y / k_tiles;
     const int col_tiles_idx = blockIdx.y % k_tiles;
 
-    const int row_tile_idx = threadIdx.x;
-    const int col_tile_idx = threadIdx.y;
+    const int col_tile_idx = threadIdx.x;
+    const int row_tile_idx = threadIdx.y;
 
     const int sm_q_offset = row_tile_idx * k_dim;
     const int sm_k_offset = col_tile_idx * k_dim;
@@ -415,23 +413,23 @@ __global__ void backward_kernel(
     extern __shared__ float _shared_mem[];
 
     float* sm_q = (float*) &_shared_mem;
-    float* sm_k = (float*) &sm_q[tile_size * k_dim];
-    float* sm_v = (float*) &sm_k[tile_size * k_dim];
-    float* sm_l = (float*) &sm_v[tile_size * v_dim];
-    float* sm_do_scaled = (float*) &sm_l[tile_size];
-    float* sm_do = (float*) &sm_do_scaled[tile_size];
+    float* sm_k = (float*) &sm_q[row_tile_size * k_dim];
+    float* sm_v = (float*) &sm_k[col_tile_size * k_dim];
+    float* sm_l = (float*) &sm_v[col_tile_size * v_dim];
+    float* sm_do_scaled = (float*) &sm_l[row_tile_size];
+    float* sm_do = (float*) &sm_do_scaled[row_tile_size];
 
     // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * col_tile_size;
-        global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
+        global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
         for (
             int d = row_tile_idx;
             d < k_dim;
-            d += tile_size
+            d += row_tile_size
         ) {
             sm_k[sm_k_offset + d] = k_[global_col][d];
         }
@@ -439,14 +437,14 @@ __global__ void backward_kernel(
         for (
             int d = row_tile_idx;
             d < v_dim;
-            d += tile_size
+            d += row_tile_size
         ) {
             sm_v[sm_v_offset + d] = v_[global_col][d];
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
             row_tiles_offset = j * row_tile_size;
-            global_row = row_tiles_offset + row_tiles_idx * tile_size + row_tile_idx;
+            global_row = row_tiles_offset + row_tiles_idx * row_tile_size + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
             should_calculate_attn = should_calculate_row &&
@@ -457,17 +455,17 @@ __global__ void backward_kernel(
             for (
                 int d = row_tile_idx;
                 d < k_dim;
-                d += tile_size
+                d += row_tile_size
             ) {
-                sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * tile_size + col_tile_idx][d];
+                sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
             }
 
             for (
                 int d = row_tile_idx;
                 d < v_dim;
-                d += tile_size
+                d += row_tile_size
             ) {
-                sm_do[col_tile_idx * v_dim + d] = do_[row_tiles_offset + row_tiles_idx * tile_size + col_tile_idx][d];
+                sm_do[col_tile_idx * v_dim + d] = do_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
             }
 
             if (col_tile_idx == 0) {
