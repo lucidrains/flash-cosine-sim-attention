@@ -89,11 +89,8 @@ __global__ void forward_kernel(
     const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
     const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
-    const int q_tiles = row_tiles;
-    const int k_tiles = col_tiles;
-
-    const int row_tiles_idx = blockIdx.y / k_tiles;
-    const int col_tiles_idx = blockIdx.y % k_tiles;
+    const int row_tiles_idx = blockIdx.y / col_tiles;
+    const int col_tiles_idx = blockIdx.y % col_tiles;
 
     const int col_tile_idx = threadIdx.x;
     const int row_tile_idx = threadIdx.y;
@@ -372,11 +369,8 @@ __global__ void backward_kernel(
     const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
     const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
-    const int q_tiles = row_tiles;
-    const int k_tiles = col_tiles;
-
-    const int row_tiles_idx = blockIdx.y / k_tiles;
-    const int col_tiles_idx = blockIdx.y % k_tiles;
+    const int row_tiles_idx = blockIdx.y / col_tiles;
+    const int col_tiles_idx = blockIdx.y % col_tiles;
 
     const int col_tile_idx = threadIdx.x;
     const int row_tile_idx = threadIdx.y;

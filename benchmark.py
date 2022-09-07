@@ -61,7 +61,14 @@ for batch, heads, seq, dim in permutations:
     k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
     v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
 
-    fused_time = fused_attention_fn(q, k, v)
+    fused_time = fused_attention_fn(
+        q,
+        k,
+        v,
+        row_tile_size = 16,
+        col_tile_size = 32,
+    )
+
     baseline_time = attention_fn(q, k, v)
 
     times_slower = fused_time / baseline_time
