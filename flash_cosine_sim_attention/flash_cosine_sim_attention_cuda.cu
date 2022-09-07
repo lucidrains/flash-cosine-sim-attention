@@ -5,10 +5,6 @@
 
 #include <torch/extension.h>
 
-// constants
-
-__constant__ int warp_size = 32;
-
 // error handler
 // from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
 
@@ -48,7 +44,7 @@ __host__ __device__ int next_pow_2(int n) {
 }
 
 __device__ void warp_reduce(volatile float* sm, int tid, int max) {
-    for (int s = warp_size; s > 0; s>>=1) {
+    for (int s = 32; s > 0; s>>=1) {
         if ((tid + s) >= max)
             continue;
 
@@ -133,31 +129,42 @@ __global__ void forward_kernel(
 
     // loop
 
-    for (int i = 0; i < num_col_tiles; i++) {
-        col_tiles_offset = i * k_block_size;
-        global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
-        should_calculate_col = global_col < k_seq_len && mask_[global_col];
+    for (int j = 0; j < num_row_tiles; j++) {
+        row_tiles_offset = j * q_block_size;
 
-        if (should_calculate_col) {
-            for (
-                int d = row_tile_idx;
-                d < k_dim;
-                d += tile_size
-            ) {
-                sm_k[sm_k_offset + d] = k_[global_col][d];
-            }
-
-            for (
-                int d = row_tile_idx;
-                d < v_dim;
-                d += tile_size
-            ) {
-                sm_v[sm_v_offset + d] = v_[global_col][d];
-            }
+        for (
+            int d = row_tile_idx;
+            d < k_dim;
+            d += tile_size
+        ) {
+            sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * tile_size + col_tile_idx][d];
         }
 
-        for (int j = 0; j < num_row_tiles; j++) {
-            row_tiles_offset = j * q_block_size;
+        for (int i = 0; i < num_col_tiles; i++) {
+            col_tiles_offset = i * k_block_size;
+            global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
+            should_calculate_col = global_col < k_seq_len && mask_[global_col];
+
+            if (should_calculate_col) {
+                for (
+                    int d = row_tile_idx;
+                    d < k_dim;
+                    d += tile_size
+                ) {
+                    sm_k[sm_k_offset + d] = k_[global_col][d];
+                }
+
+                for (
+                    int d = row_tile_idx;
+                    d < v_dim;
+                    d += tile_size
+                ) {
+                    sm_v[sm_v_offset + d] = v_[global_col][d];
+                }
+            }
+
+            __syncthreads();
+
             global_row = row_tiles_offset + row_tiles_idx * tile_size + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
@@ -166,21 +173,11 @@ __global__ void forward_kernel(
                                     ( !causal ||
                                       (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
-            for (
-                int d = row_tile_idx;
-                d < k_dim;
-                d += tile_size
-            ) {
-                sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * tile_size + col_tile_idx][d];
-            }
-
-            __syncthreads();
-
             if (should_calculate_attn) {
                 float attn = 0;
                 for (int d = 0; d < k_dim; d++) {
                     // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
-                    int dmod = (d + (threadIdx.x % warp_size)) % k_dim;
+                    int dmod = (d + (threadIdx.x % 32)) % k_dim;
                     attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
                 }
 
@@ -288,8 +285,8 @@ __global__ void backward_calculate_do_scaled(
     const int seq_idx = blockIdx.y;
     const int dim_idx = threadIdx.x;
 
-    const int warp_id = threadIdx.x / warp_size;
-    const int lane = threadIdx.x % warp_size;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
 
     const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
 
@@ -310,7 +307,7 @@ __global__ void backward_calculate_do_scaled(
 
     // warp shuffle reduce
 
-    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
         val += __shfl_down_sync(mask, val, offset);
     }
 
@@ -320,13 +317,13 @@ __global__ void backward_calculate_do_scaled(
     __syncthreads();
 
     if (warp_id == 0) {
-        if (dim_idx < (blockDim.x / warp_size)) {
+        if (dim_idx < (blockDim.x / 32)) {
             val = sm_do_scaled[lane];
         } else{
             val = 0;
         }
 
-        for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+        for (int offset = 16; offset > 0; offset >>= 1) {
             val += __shfl_down_sync(mask, val, offset);
         }
 
@@ -484,7 +481,7 @@ __global__ void backward_kernel(
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
                     // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
-                    int dmod = (d + (threadIdx.x % warp_size)) % k_dim;
+                    int dmod = (d + (threadIdx.x % 32)) % k_dim;
                     attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
                 }
 
