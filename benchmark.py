@@ -1,7 +1,13 @@
 import torch
 import argparse
+from itertools import product
 from flash_cosine_sim_attention.benchmark import benchmark
 from flash_cosine_sim_attention import plain_cosine_sim_attention, flash_cosine_sim_attention
+
+# helper functions
+
+def cast_tuple(t):
+    return t if isinstance(t, tuple) else (t,)
 
 # argparse
 
@@ -14,10 +20,9 @@ assert not (args.only_forwards and args.only_backwards)
 
 # constants
 
-TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048)
-
-BATCH_SIZE = 1
+BATCH_SIZES = (2, 4, 8)
 HEADS = 4
+TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048)
 DIM = 64
 
 Q_BLOCK_SIZE = 64
@@ -39,14 +44,29 @@ attention_fn = benchmark(
     backwards = TEST_BACKWARDS
 )
 
-for seq_len in TEST_SEQUENCE_LENGTHS:
-    q = torch.randn(BATCH_SIZE, HEADS, seq_len, DIM).cuda().requires_grad_()
-    k = torch.randn(BATCH_SIZE, HEADS, seq_len, DIM).cuda().requires_grad_()
-    v = torch.randn(BATCH_SIZE, HEADS, seq_len, DIM).cuda().requires_grad_()
+# all permutations
+
+params = dict((
+    ('batch size', BATCH_SIZES),
+    ('heads', HEADS),
+    ('sequence lengths', TEST_SEQUENCE_LENGTHS),
+    ('feature dimension', DIM)
+))
+
+permutations = list(product(*map(cast_tuple, params.values())))
+
+for batch, heads, seq, dim in permutations:
+    print('-' * 60)
+    print(f'batch: {batch}\theads: {heads}\tseq: {seq}\tdim {dim}\t')
+    print('-' * 60)
+
+    q = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
+    k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
+    v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
 
     fused_time = fused_attention_fn(q, k, v, q_block_size = Q_BLOCK_SIZE, k_block_size = K_BLOCK_SIZE)
     baseline_time = attention_fn(q, k, v)
 
     times_slower = fused_time / baseline_time
 
-    print(f'slower: {times_slower:.3f}x\t seq_len: {seq_len}\tfused kernel: {fused_time:.3f}\tbaseline: {baseline_time:.3f}')
+    print(f'\nslower: {times_slower:.2f}x\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time:.2f}ms\n')
