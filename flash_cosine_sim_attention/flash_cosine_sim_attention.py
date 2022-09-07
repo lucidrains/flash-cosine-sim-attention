@@ -22,6 +22,9 @@ def default(val, d):
         return val
     return d() if callable(d) else d
 
+def divisible_by(numer, denom):
+    return (numer % denom) == 0
+
 def l2norm(t):
     return F.normalize(t, dim = -1)
 
@@ -77,11 +80,21 @@ class FlashCosineSimAttention(Function):
         attn_bias,
         scale,
         causal,
-        q_block_size,
-        k_block_size,
-        tile_size,
-        backward_tile_size
+        row_tile_size,
+        col_tile_size,
+        row_tiles,
+        col_tiles,
+        backward_row_tile_size,
+        backward_col_tile_size,
+        backward_row_tiles,
+        backward_col_tiles
     ):
+        assert col_tiles == 1 and backward_col_tiles == 1
+        assert divisible_by(col_tile_size, 32)
+
+        assert row_tile_size == col_tile_size
+        assert backward_row_tile_size == backward_col_tile_size
+
         batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
 
         mask = default(mask, lambda: torch.ones(q.shape[0], q.shape[2], device = q.device, dtype = torch.bool))
@@ -91,18 +104,31 @@ class FlashCosineSimAttention(Function):
 
         attn_bias = default(attn_bias, torch.zeros(1, 0, 0, device = q.device, dtype = dtype))
 
-        forward(q, k, v, o, l, mask, attn_bias, scale, causal, q_block_size, k_block_size, tile_size)
+        forward(
+            q, k, v, o, l,
+            mask,
+            attn_bias,
+            scale,
+            causal,
+            row_tile_size,
+            col_tile_size,
+            row_tiles,
+            col_tiles
+        )
 
         o.div_(l[..., None].clamp(min = 1e-20))
 
         ctx.save_for_backward(o, l, q, k, v, mask, attn_bias)
 
-        ctx.scale = scale
-        ctx.causal = causal
-        ctx.q_block_size = q_block_size
-        ctx.k_block_size = k_block_size
-        ctx.tile_size = tile_size
-        ctx.backward_tile_size = backward_tile_size
+        ctx.params = (
+            scale,
+            causal,
+            backward_row_tile_size,
+            backward_col_tile_size,
+            backward_row_tiles,
+            backward_col_tiles
+        )
+
         return o
 
     @staticmethod
@@ -111,23 +137,37 @@ class FlashCosineSimAttention(Function):
 
         batch, heads, src_seq, tgt_seq, device, dtype = *q.shape[:3], k.shape[2], q.device, q.dtype
 
-        scale = ctx.scale
-        causal = ctx.causal
-        q_block_size = ctx.q_block_size
-        k_block_size = ctx.k_block_size
-        tile_size = ctx.tile_size
-        backward_tile_size = ctx.backward_tile_size
+        (
+            scale,
+            causal,
+            backward_row_tile_size,
+            backward_col_tile_size,
+            backward_row_tiles,
+            backward_col_tiles
+        ) = ctx.params
 
         dq, dk, dv = map(torch.zeros_like, (q, k, v))
 
         db = torch.zeros((heads, src_seq, tgt_seq), device = device, dtype = dtype) if attn_bias.requires_grad else torch.zeros((heads, 0, 0), device = device, dtype = dtype)
         do_scaled = torch.zeros_like(l)
 
-        backward(do, o, l, q, k, v, dq, dk, dv, db, do_scaled, mask, attn_bias, scale, causal, q_block_size, k_block_size, backward_tile_size)
+        backward(
+            do, o, l,
+            q, k, v,
+            dq, dk, dv, db, do_scaled,
+            mask,
+            attn_bias,
+            scale,
+            causal,
+            backward_row_tile_size,
+            backward_col_tile_size,
+            backward_row_tiles,
+            backward_col_tiles
+        )
 
         db = db if attn_bias.requires_grad else None
 
-        return dq, dk, dv, None, db, None, None, None, None, None, None
+        return dq, dk, dv, None, db, None, None, None, None, None, None, None, None, None, None
 
 # wrapper function
 
@@ -139,14 +179,34 @@ def flash_cosine_sim_attention(
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 8,
     causal = False,
-    q_block_size = 64,
-    k_block_size = 64,
     l2norm_qk = True,
-    tile_size = 16,
-    backward_tile_size = 16
+    row_tile_size = 32,
+    col_tile_size = 32,
+    row_tiles = 1,
+    col_tiles = 1,
+    backward_row_tile_size = 16,
+    backward_col_tile_size = 16,
+    backward_row_tiles = 1,
+    backward_col_tiles = 1,
 ) -> TensorType['b', 'h', 'i', 'd']:
 
     if l2norm_qk:
         q, k = map(l2norm, (q, k))
 
-    return FlashCosineSimAttention.apply(q, k, v, mask, attn_bias, scale, causal, q_block_size, k_block_size, tile_size, backward_tile_size)
+    o = FlashCosineSimAttention.apply(
+        q, k, v,
+        mask,
+        attn_bias,
+        scale,
+        causal,
+        row_tile_size,
+        col_tile_size,
+        row_tiles,
+        col_tiles,
+        backward_row_tile_size,
+        backward_col_tile_size,
+        backward_row_tiles,
+        backward_col_tiles
+    )
+
+    return o

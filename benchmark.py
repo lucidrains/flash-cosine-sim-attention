@@ -25,9 +25,6 @@ HEADS = 4
 TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048)
 DIM = 64
 
-Q_BLOCK_SIZE = 64
-K_BLOCK_SIZE = 64
-
 TEST_FORWARDS = not args.only_backwards
 TEST_BACKWARDS = not args.only_forwards
 
@@ -64,7 +61,7 @@ for batch, heads, seq, dim in permutations:
     k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
     v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
 
-    fused_time = fused_attention_fn(q, k, v, q_block_size = Q_BLOCK_SIZE, k_block_size = K_BLOCK_SIZE)
+    fused_time = fused_attention_fn(q, k, v)
     baseline_time = attention_fn(q, k, v)
 
     times_slower = fused_time / baseline_time

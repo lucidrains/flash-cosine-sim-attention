@@ -70,8 +70,10 @@ __global__ void forward_kernel(
     const float scale,
     const bool causal,
     const bool has_attn_bias,
-    const int q_block_size,
-    const int k_block_size
+    const int row_tile_size,
+    const int col_tile_size,
+    const int row_tiles,
+    const int col_tiles
 ) {
     const int batch = q.size(0);
     const int head = q.size(1);
@@ -84,12 +86,12 @@ __global__ void forward_kernel(
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const int num_col_tiles = cdiv(k_seq_len, k_block_size);
-    const int num_row_tiles = cdiv(q_seq_len, q_block_size);
+    const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
+    const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
     const int tile_size = blockDim.x;
-    const int q_tiles = q_block_size / tile_size;
-    const int k_tiles = k_block_size / tile_size;
+    const int q_tiles = row_tiles;
+    const int k_tiles = col_tiles;
 
     const int row_tiles_idx = blockIdx.y / k_tiles;
     const int col_tiles_idx = blockIdx.y % k_tiles;
@@ -130,7 +132,7 @@ __global__ void forward_kernel(
     // loop
 
     for (int j = 0; j < num_row_tiles; j++) {
-        row_tiles_offset = j * q_block_size;
+        row_tiles_offset = j * row_tile_size;
 
         for (
             int d = row_tile_idx;
@@ -141,7 +143,7 @@ __global__ void forward_kernel(
         }
 
         for (int i = 0; i < num_col_tiles; i++) {
-            col_tiles_offset = i * k_block_size;
+            col_tiles_offset = i * col_tile_size;
             global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
             should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
@@ -217,14 +219,11 @@ void flash_cosine_sim_attention_forward(
     torch::Tensor attn_bias,
     float scale,
     bool causal,
-    int q_block_size,
-    int k_block_size,
-    int tile_size
+    int row_tile_size,
+    int col_tile_size,
+    int row_tiles,
+    int col_tiles
 ) {
-    assert(("tile size needs to be 32 or less", tile_size <= 32));
-    assert(("query block size needs to be divisible by tile size", divisible_by(q_block_size, tile_size)));
-    assert(("key block size needs to be divisible by tile size", divisible_by(k_block_size, tile_size)));
-
     const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
 
     const int batch = q.size(0);
@@ -233,10 +232,10 @@ void flash_cosine_sim_attention_forward(
     const int v_dim = v.size(3);
     const bool has_attn_bias = !!attn_bias.numel();
 
-    const dim3 threads_per_block(tile_size, tile_size);
-    const dim3 blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
+    const dim3 blocks(batch * heads, row_tiles * col_tiles);
+    const dim3 threads_per_block(col_tile_size, row_tile_size);
 
-    const unsigned shared_mem_size = tile_size * (2 * k_dim + v_dim) * sizeof(float); // q, k, v
+    const unsigned shared_mem_size = (row_tile_size * (2 * k_dim + v_dim) + col_tile_size * (2 * k_dim + v_dim)) * sizeof(float); // q, k, v
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_forward", ([&] {
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
@@ -250,8 +249,10 @@ void flash_cosine_sim_attention_forward(
             scale,
             causal,
             has_attn_bias,
-            q_block_size,
-            k_block_size
+            row_tile_size,
+            col_tile_size,
+            row_tiles,
+            col_tiles
         );
     }));
 
@@ -352,8 +353,10 @@ __global__ void backward_kernel(
     const float scale,
     const bool causal,
     const bool has_attn_bias,
-    const int q_block_size,
-    const int k_block_size
+    const int row_tile_size,
+    const int col_tile_size,
+    const int row_tiles,
+    const int col_tiles
 ) {
 
     const int batch = q.size(0);
@@ -367,12 +370,12 @@ __global__ void backward_kernel(
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const int num_col_tiles = cdiv(k_seq_len, k_block_size);
-    const int num_row_tiles = cdiv(q_seq_len, q_block_size);
+    const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
+    const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
     const int tile_size = blockDim.x;
-    const int q_tiles = q_block_size / tile_size;
-    const int k_tiles = k_block_size / tile_size;
+    const int q_tiles = row_tile_size / tile_size;
+    const int k_tiles = col_tile_size / tile_size;
 
     const int row_tiles_idx = blockIdx.y / k_tiles;
     const int col_tiles_idx = blockIdx.y % k_tiles;
@@ -421,7 +424,7 @@ __global__ void backward_kernel(
     // loop
 
     for (int i = 0; i < num_col_tiles; i++) {
-        col_tiles_offset = i * k_block_size;
+        col_tiles_offset = i * col_tile_size;
         global_col = col_tiles_offset + col_tiles_idx * tile_size + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
@@ -442,7 +445,7 @@ __global__ void backward_kernel(
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
-            row_tiles_offset = j * q_block_size;
+            row_tiles_offset = j * row_tile_size;
             global_row = row_tiles_offset + row_tiles_idx * tile_size + row_tile_idx;
             should_calculate_row = global_row < q_seq_len;
 
@@ -561,14 +564,11 @@ void flash_cosine_sim_attention_backward(
     torch::Tensor attn_bias,
     float scale,
     bool causal,
-    int q_block_size,
-    int k_block_size,
-    int tile_size
+    int row_tile_size,
+    int col_tile_size,
+    int row_tiles,
+    int col_tiles
 ) {
-    assert(("tile size needs to be 32 or less", tile_size <= 32));
-    assert(("query block size needs to be divisible by tile size", divisible_by(q_block_size, tile_size)));
-    assert(("key block size needs to be divisible by tile size", divisible_by(k_block_size, tile_size)));
-
     const at::cuda::OptionalCUDAGuard device_guard(device_of(dq));
 
     const int batch = dq.size(0);
@@ -589,12 +589,12 @@ void flash_cosine_sim_attention_backward(
 
     // setup backwards call
 
-    const dim3 backwards_threads_per_block(tile_size, tile_size);
-    const dim3 backwards_blocks(batch * heads, (q_block_size / tile_size) * (k_block_size / tile_size));
+    const dim3 backwards_threads_per_block(col_tile_size, row_tile_size);
+    const dim3 backwards_blocks(batch * heads, row_tiles * col_tiles);
 
-    const unsigned backwards_shared_mem_size = (  tile_size * 2 * k_dim +      // q, k
-                                                  tile_size * v_dim * 2 +      // v, do
-                                                  tile_size * 2                // l, do_scaled
+    const unsigned backwards_shared_mem_size = (  (row_tile_size + col_tile_size) * k_dim +      // q, k
+                                                  (row_tile_size + col_tile_size) * v_dim +      // v, do
+                                                  (row_tile_size + col_tile_size)                // l, do_scaled
                                                 ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
@@ -620,8 +620,10 @@ void flash_cosine_sim_attention_backward(
             scale,
             causal,
             has_attn_bias,
-            q_block_size,
-            k_block_size
+            row_tile_size,
+            col_tile_size,
+            row_tiles,
+            col_tiles
         );
     }));
 
