@@ -95,6 +95,13 @@ __global__ void forward_kernel(
     const int col_tile_idx = threadIdx.x;
     const int row_tile_idx = threadIdx.y;
 
+    // for coalesced reads
+
+    const int thread_idx = col_tile_size * row_tile_idx + col_tile_idx;
+    const int tpb = blockDim.x * blockDim.y;
+
+    // for warp reducing
+
     const int lane_id = threadIdx.x % 32;
     const int col_num_warps = col_tile_size / 32;
     const int warp_id_per_row = col_tile_idx / 32;
@@ -103,6 +110,9 @@ __global__ void forward_kernel(
     const int sm_k_offset = col_tile_idx * k_dim;
     const int sm_v_offset = col_tile_idx * v_dim;
     const int sm_o_offset = row_tile_idx * v_dim;
+
+    const int k_total_el = col_tile_size * k_dim;
+    const int v_total_el = col_tile_size * v_dim;
 
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
@@ -150,22 +160,33 @@ __global__ void forward_kernel(
             global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
             should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
-            if (should_calculate_col) {
-                for (
-                    int d = row_tile_idx;
-                    d < k_dim;
-                    d += row_tile_size
-                ) {
-                    sm_k[sm_k_offset + d] = k_[global_col][d];
-                }
+            // coalesced reads from hbm
+            // cleanup later, make it work first
 
-                for (
-                    int d = row_tile_idx;
-                    d < v_dim;
-                    d += row_tile_size
-                ) {
-                    sm_v[sm_v_offset + d] = v_[global_col][d];
-                }
+            for (
+                int offset = 0;
+                offset < k_total_el;
+                offset += tpb
+            ) {
+                int smem_idx = offset + thread_idx;
+                int gmem_seq_idx = smem_idx / k_dim;
+                int gmem_dim_idx = smem_idx % k_dim;
+
+                if (smem_idx < k_total_el)
+                    sm_k[smem_idx] = k_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
+            }
+
+            for (
+                int offset = 0;
+                offset < v_total_el;
+                offset += tpb
+            ) {
+                int smem_idx = offset + thread_idx;
+                int gmem_seq_idx = smem_idx / v_dim;
+                int gmem_dim_idx = smem_idx % v_dim;
+
+                if (smem_idx < v_total_el)
+                    sm_v[smem_idx] = v_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
             }
 
             __syncthreads();
@@ -422,6 +443,12 @@ __global__ void backward_kernel(
     const int col_tile_idx = threadIdx.x;
     const int row_tile_idx = threadIdx.y;
 
+    const int thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
+    const int tpb = blockDim.x * blockDim.y;
+
+    const int k_total_el = k_dim * col_tile_size;
+    const int v_total_el = v_dim * col_tile_size;
+
     const int sm_q_offset = row_tile_idx * k_dim;
     const int sm_k_offset = col_tile_idx * k_dim;
     const int sm_v_offset = col_tile_idx * v_dim;
@@ -467,20 +494,33 @@ __global__ void backward_kernel(
         global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && mask_[global_col];
 
+        // coalesced reads
+        // cleanup later
+
         for (
-            int d = row_tile_idx;
-            d < k_dim;
-            d += row_tile_size
+            int offset = 0;
+            offset < k_total_el;
+            offset += tpb
         ) {
-            sm_k[sm_k_offset + d] = k_[global_col][d];
+            int sm_idx = offset + thread_idx;
+            int gmem_seq_idx = sm_idx / k_dim;
+            int gmem_dim_idx = sm_idx % k_dim;
+
+            if (offset < k_total_el)
+                sm_k[sm_idx] = k_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
         }
 
         for (
-            int d = row_tile_idx;
-            d < v_dim;
-            d += row_tile_size
+            int offset = 0;
+            offset < v_total_el;
+            offset += tpb
         ) {
-            sm_v[sm_v_offset + d] = v_[global_col][d];
+            int sm_idx = offset + thread_idx;
+            int gmem_seq_idx = sm_idx / v_dim;
+            int gmem_dim_idx = sm_idx % v_dim;
+
+            if (offset < v_total_el)
+                sm_v[sm_idx] = v_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
         }
 
         for (int j = 0; j < num_row_tiles; j++) {
@@ -494,19 +534,19 @@ __global__ void backward_kernel(
                                       (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
             for (
-                int d = row_tile_idx;
+                int d = col_tile_idx;
                 d < k_dim;
-                d += row_tile_size
+                d += col_tile_size
             ) {
-                sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
+                sm_q[row_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + row_tile_idx][d];
             }
 
             for (
-                int d = row_tile_idx;
+                int d = col_tile_idx;
                 d < v_dim;
-                d += row_tile_size
+                d += col_tile_size
             ) {
-                sm_do[col_tile_idx * v_dim + d] = do_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
+                sm_do[row_tile_idx * v_dim + d] = do_[row_tiles_offset + row_tiles_idx * row_tile_size + row_tile_idx][d];
             }
 
             if (col_tile_idx == 0) {
