@@ -132,7 +132,7 @@ __global__ void forward_kernel(
     float* sm_q = (float*) &_shared_mem;
     float* sm_k = (float*) &sm_q[row_tile_size * k_dim];
     float* sm_v = (float*) &sm_k[col_tile_size * k_dim];
-    float* sm_l = (float*) &sm_k[col_tile_size * v_dim];
+    float* sm_l = (float*) &sm_v[col_tile_size * v_dim];
 
     // some variable
 
@@ -283,12 +283,14 @@ void flash_cosine_sim_attention_forward(
     int row_tiles,
     int col_tiles
 ) {
+
     const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
 
     const int batch = q.size(0);
     const int heads = q.size(1);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
+
     const bool has_attn_bias = !!attn_bias.numel();
 
     const dim3 blocks(batch * heads, row_tiles * col_tiles);
