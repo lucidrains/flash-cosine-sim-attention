@@ -63,6 +63,17 @@ $ pip install -r requirements.txt && python train.py --use-cuda-kernel
 ```
 
 ```bibtex
+@misc{rabe2021selfattention,
+    title   = {Self-attention Does Not Need $O(n^2)$ Memory}, 
+    author  = {Markus N. Rabe and Charles Staats},
+    year    = {2021},
+    eprint  = {2112.05682},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG}
+}
+```
+
+```bibtex
 @inproceedings{Henry2020QueryKeyNF,
     title   = {Query-Key Normalization for Transformers},
     author  = {Alex Henry and Prudhvi Raj Dachapally and Shubham Vivek Pawar and Yuxuan Chen},
