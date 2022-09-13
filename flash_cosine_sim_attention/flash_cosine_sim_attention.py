@@ -97,7 +97,7 @@ class FlashCosineSimAttention(Function):
 
         batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
 
-        mask = default(mask, lambda: torch.ones(q.shape[0], q.shape[2], device = q.device, dtype = torch.bool))
+        mask = default(mask, lambda: torch.ones(q.shape[0], 0, device = q.device, dtype = torch.bool))
 
         attn_bias = default(attn_bias, torch.empty(1, 0, 0, device = q.device, dtype = dtype))
 

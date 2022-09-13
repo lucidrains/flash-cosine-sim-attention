@@ -69,6 +69,7 @@ __global__ void forward_kernel(
           PackedAccessor<scalar_t, 3> l,
     const float scale,
     const bool causal,
+    const bool has_mask,
     const bool has_attn_bias,
     const int row_tile_size,
     const int col_tile_size,
@@ -158,7 +159,7 @@ __global__ void forward_kernel(
         for (int i = 0; i < num_col_tiles; i++) {
             col_tiles_offset = i * col_tile_size;
             global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
-            should_calculate_col = global_col < k_seq_len && mask_[global_col];
+            should_calculate_col = global_col < k_seq_len && (!has_mask || mask_[global_col]);
 
             // coalesced reads from hbm
             // cleanup later, make it work first
@@ -297,6 +298,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     auto l = at::zeros({batch, heads, seq}, options);
 
     const bool has_attn_bias = !!attn_bias.numel();
+    const bool has_mask = !!mask.numel();
 
     const dim3 blocks(batch * heads, row_tiles * col_tiles);
     const dim3 threads_per_block(col_tile_size, row_tile_size);
@@ -319,6 +321,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
             ACCESSOR(l, 3, scalar_t),
             scale,
             causal,
+            has_mask,
             has_attn_bias,
             row_tile_size,
             col_tile_size,
@@ -423,6 +426,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 3> l,
     const float scale,
     const bool causal,
+    const bool has_mask,
     const bool has_attn_bias,
     const int row_tile_size,
     const int col_tile_size,
@@ -499,7 +503,7 @@ __global__ void backward_kernel(
     for (int i = 0; i < num_col_tiles; i++) {
         col_tiles_offset = i * col_tile_size;
         global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
-        should_calculate_col = global_col < k_seq_len && mask_[global_col];
+        should_calculate_col = global_col < k_seq_len && (!has_mask || mask_[global_col]);
 
         // coalesced reads
         // cleanup later
@@ -662,12 +666,13 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     const int v_dim = v.size(3);
 
     const bool has_attn_bias = !!d_attn_bias.numel();
+    const bool has_mask = !!mask.numel();
 
     auto options = torch::TensorOptions().device(query_device).dtype(torch::kFloat);
 
     // setup dq, dk, dv
 
-    auto do_scaled = at::zeros_like(l, options);
+    auto do_scaled = at::empty_like(l, options);
 
     auto dq = at::zeros_like(q, options);
     auto dk = at::zeros_like(k, options);
@@ -713,6 +718,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(l, 3, scalar_t),
             scale,
             causal,
+            has_mask,
             has_attn_bias,
             row_tile_size,
             col_tile_size,
