@@ -99,13 +99,10 @@ class FlashCosineSimAttention(Function):
 
         mask = default(mask, lambda: torch.ones(q.shape[0], q.shape[2], device = q.device, dtype = torch.bool))
 
-        o = torch.zeros((batch, heads, seq, dim), device = device, dtype = torch.float32)
-        l = torch.zeros((batch, heads, seq), device = device, dtype = torch.float32)
+        attn_bias = default(attn_bias, torch.empty(1, 0, 0, device = q.device, dtype = dtype))
 
-        attn_bias = default(attn_bias, torch.zeros(1, 0, 0, device = q.device, dtype = dtype))
-
-        forward(
-            q, k, v, o, l,
+        o, l = forward(
+            q, k, v,
             mask,
             attn_bias,
             scale,
@@ -146,15 +143,12 @@ class FlashCosineSimAttention(Function):
             backward_col_tiles
         ) = ctx.params
 
-        dq, dk, dv = map(torch.zeros_like, (q, k, v))
-
         db = torch.zeros((heads, src_seq, tgt_seq), device = device, dtype = dtype) if attn_bias.requires_grad else torch.zeros((heads, 0, 0), device = device, dtype = dtype)
-        do_scaled = torch.zeros_like(l)
 
-        backward(
+        dq, dk, dv = backward(
             do, o, l,
             q, k, v,
-            dq, dk, dv, db, do_scaled,
+            db,
             mask,
             attn_bias,
             scale,

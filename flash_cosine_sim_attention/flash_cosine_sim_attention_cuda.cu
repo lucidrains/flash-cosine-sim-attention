@@ -268,12 +268,10 @@ __global__ void forward_kernel(
 
 // forwards c++ function
 
-void flash_cosine_sim_attention_forward(
+std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
-    torch::Tensor o,
-    torch::Tensor l,
     torch::Tensor mask,
     torch::Tensor attn_bias,
     float scale,
@@ -284,12 +282,19 @@ void flash_cosine_sim_attention_forward(
     int col_tiles
 ) {
 
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(o));
+    auto query_device = device_of(q);
+    const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
     const int batch = q.size(0);
     const int heads = q.size(1);
+    const int seq   = q.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
+
+    auto options = torch::TensorOptions().device(query_device).dtype(torch::kFloat);
+
+    auto o = at::zeros({batch, heads, seq, v_dim}, options);
+    auto l = at::zeros({batch, heads, seq}, options);
 
     const bool has_attn_bias = !!attn_bias.numel();
 
@@ -328,7 +333,7 @@ void flash_cosine_sim_attention_forward(
 
     CHECK_LAST_CUDA_ERROR();
 
-    return;
+    return {o, l};
 }
 
 // backward kernel
@@ -629,18 +634,14 @@ __global__ void backward_kernel(
 
 // backwards c++ function
 
-void flash_cosine_sim_attention_backward(
+std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
     torch::Tensor l,
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
-    torch::Tensor dq,
-    torch::Tensor dk,
-    torch::Tensor dv,
     torch::Tensor d_attn_bias,
-    torch::Tensor do_scaled,
     torch::Tensor mask,
     torch::Tensor attn_bias,
     float scale,
@@ -650,15 +651,27 @@ void flash_cosine_sim_attention_backward(
     int row_tiles,
     int col_tiles
 ) {
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(dq));
+    auto query_device = device_of(q);
 
-    const int batch = dq.size(0);
-    const int heads = dq.size(1);
+    const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
-    const int seq   = dq.size(2);
+    const int batch = q.size(0);
+    const int heads = q.size(1);
+    const int seq   = q.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
+
     const bool has_attn_bias = !!d_attn_bias.numel();
+
+    auto options = torch::TensorOptions().device(query_device).dtype(torch::kFloat);
+
+    // setup dq, dk, dv
+
+    auto do_scaled = at::zeros_like(l, options);
+
+    auto dq = at::zeros_like(q, options);
+    auto dk = at::zeros_like(k, options);
+    auto dv = at::zeros_like(v, options);
 
     // setup backwards preprocess call
 
@@ -714,7 +727,7 @@ void flash_cosine_sim_attention_backward(
 
     CHECK_LAST_CUDA_ERROR();
 
-    return;
+    return {dq, dk, dv};
 }
 
 // bind
