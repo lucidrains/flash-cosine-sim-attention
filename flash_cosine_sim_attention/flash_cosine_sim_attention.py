@@ -47,6 +47,7 @@ def plain_cosine_sim_attention(
     l2norm_qk = True
 
 ) -> TensorType['b', 'h', 'i', 'd']:
+    assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
         q, k = map(l2norm, (q, k))
@@ -183,6 +184,8 @@ def flash_cosine_sim_attention(
     backward_row_tiles = 1,
     backward_col_tiles = 1,
 ) -> TensorType['b', 'h', 'i', 'd']:
+
+    assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
         q, k = map(l2norm, (q, k))
