@@ -83,7 +83,6 @@ class FlashCosineSimAttention(Function):
         causal,
         row_tile_size,
         col_tile_size,
-        row_tiles,
         col_tiles,
         backward_row_tile_size,
         backward_col_tile_size,
@@ -110,7 +109,6 @@ class FlashCosineSimAttention(Function):
             causal,
             row_tile_size,
             col_tile_size,
-            row_tiles,
             col_tiles
         )
 
@@ -177,7 +175,6 @@ def flash_cosine_sim_attention(
     l2norm_qk = True,
     row_tile_size = 32,
     col_tile_size = 32,
-    row_tiles = 1,
     col_tiles = 1,
     backward_row_tile_size = 16,
     backward_col_tile_size = 16,
@@ -198,7 +195,6 @@ def flash_cosine_sim_attention(
         causal,
         row_tile_size,
         col_tile_size,
-        row_tiles,
         col_tiles,
         backward_row_tile_size,
         backward_col_tile_size,

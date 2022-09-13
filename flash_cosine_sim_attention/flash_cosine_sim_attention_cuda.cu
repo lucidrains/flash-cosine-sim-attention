@@ -73,7 +73,6 @@ __global__ void forward_kernel(
     const bool has_attn_bias,
     const int row_tile_size,
     const int col_tile_size,
-    const int row_tiles,
     const int col_tiles
 ) {
     const int batch = q.size(0);
@@ -88,7 +87,6 @@ __global__ void forward_kernel(
     const int v_dim = v.size(3);
 
     const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
-    const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
 
     const int row_tiles_idx = blockIdx.y / col_tiles;
     const int col_tiles_idx = blockIdx.y % col_tiles;
@@ -137,134 +135,131 @@ __global__ void forward_kernel(
 
     // some variable
 
-    int col_tiles_offset, row_tiles_offset;
-    int global_col, global_row;
-    bool should_calculate_attn, should_calculate_row, should_calculate_col;
+    int col_tiles_offset;
+    int global_col;
+    bool should_calculate_attn, should_calculate_col;
+
+    const int row_tiles_offset = row_tiles_idx * row_tile_size;
+    const int global_row = row_tiles_offset + row_tile_idx;
+    const bool should_calculate_row = global_row < q_seq_len;
 
     // loop
 
-    for (int j = 0; j < num_row_tiles; j++) {
-        row_tiles_offset = j * row_tile_size;
+    for (
+        int d = row_tile_idx;
+        d < k_dim;
+        d += row_tile_size
+    ) {
+        sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + col_tile_idx][d];
+    }
+
+    float acc_attn = 0;
+
+    for (int i = 0; i < num_col_tiles; i++) {
+        col_tiles_offset = i * col_tile_size;
+        global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
+        should_calculate_col = global_col < k_seq_len && (!has_mask || mask_[global_col]);
+
+        // coalesced reads from hbm
+        // cleanup later, make it work first
 
         for (
-            int d = row_tile_idx;
-            d < k_dim;
-            d += row_tile_size
+            int offset = 0;
+            offset < k_total_el;
+            offset += tpb
         ) {
-            sm_q[col_tile_idx * k_dim + d] = q_[row_tiles_offset + row_tiles_idx * row_tile_size + col_tile_idx][d];
+            int smem_idx = offset + thread_idx;
+            int gmem_seq_idx = smem_idx / k_dim;
+            int gmem_dim_idx = smem_idx % k_dim;
+
+            if (smem_idx < k_total_el)
+                sm_k[smem_idx] = k_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
         }
 
-        float acc_attn = 0;
+        for (
+            int offset = 0;
+            offset < v_total_el;
+            offset += tpb
+        ) {
+            int smem_idx = offset + thread_idx;
+            int gmem_seq_idx = smem_idx / v_dim;
+            int gmem_dim_idx = smem_idx % v_dim;
 
-        for (int i = 0; i < num_col_tiles; i++) {
-            col_tiles_offset = i * col_tile_size;
-            global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
-            should_calculate_col = global_col < k_seq_len && (!has_mask || mask_[global_col]);
-
-            // coalesced reads from hbm
-            // cleanup later, make it work first
-
-            for (
-                int offset = 0;
-                offset < k_total_el;
-                offset += tpb
-            ) {
-                int smem_idx = offset + thread_idx;
-                int gmem_seq_idx = smem_idx / k_dim;
-                int gmem_dim_idx = smem_idx % k_dim;
-
-                if (smem_idx < k_total_el)
-                    sm_k[smem_idx] = k_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
-            }
-
-            for (
-                int offset = 0;
-                offset < v_total_el;
-                offset += tpb
-            ) {
-                int smem_idx = offset + thread_idx;
-                int gmem_seq_idx = smem_idx / v_dim;
-                int gmem_dim_idx = smem_idx % v_dim;
-
-                if (smem_idx < v_total_el)
-                    sm_v[smem_idx] = v_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
-            }
-
-            __syncthreads();
-
-            global_row = row_tiles_offset + row_tiles_idx * row_tile_size + row_tile_idx;
-            should_calculate_row = global_row < q_seq_len;
-
-            should_calculate_attn = should_calculate_row &&
-                                    should_calculate_col &&
-                                    ( !causal ||
-                                      (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
-
-            float attn = 0;
-
-            if (should_calculate_attn) {
-                for (int d = 0; d < k_dim; d++) {
-                    // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
-                    int dmod = (d + (threadIdx.x % 32)) % k_dim;
-                    attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
-                }
-
-                attn *= scale;
-
-                if (has_attn_bias) {
-                    attn += attn_bias_[global_row][global_col];
-                }
-
-                attn -= scale;
-                attn = __expf(attn);
-
-                float exp_weighted_value;
-
-                for (int d = 0; d < v_dim; d++) {
-                    exp_weighted_value = attn * sm_v[sm_v_offset + d];
-                    atomicAdd((float*) &o_[global_row][d], exp_weighted_value);
-                }
-            }
-
-            __syncthreads();
-
-            acc_attn += attn;
-
+            if (smem_idx < v_total_el)
+                sm_v[smem_idx] = v_[col_tiles_offset + col_tiles_idx * col_tile_size + gmem_seq_idx][gmem_dim_idx];
         }
 
-        // reduce accumulated attention from inner loop
+        __syncthreads();
 
-        const unsigned shfl_mask = __ballot_sync(0xFFFFFFFFU, should_calculate_row);
+        should_calculate_attn = should_calculate_row &&
+                                should_calculate_col &&
+                                ( !causal ||
+                                  (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
+
+        float attn = 0;
+
+        if (should_calculate_attn) {
+            for (int d = 0; d < k_dim; d++) {
+                // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
+                int dmod = (d + (threadIdx.x % 32)) % k_dim;
+                attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
+            }
+
+            attn *= scale;
+
+            if (has_attn_bias) {
+                attn += attn_bias_[global_row][global_col];
+            }
+
+            attn -= scale;
+            attn = __expf(attn);
+
+            float exp_weighted_value;
+
+            for (int d = 0; d < v_dim; d++) {
+                exp_weighted_value = attn * sm_v[sm_v_offset + d];
+                atomicAdd((float*) &o_[global_row][d], exp_weighted_value);
+            }
+        }
+
+        __syncthreads();
+
+        acc_attn += attn;
+
+    }
+
+    // reduce accumulated attention from inner loop
+
+    const unsigned shfl_mask = __ballot_sync(0xFFFFFFFFU, should_calculate_row);
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc_attn += __shfl_down_sync(shfl_mask, acc_attn, offset);
+    }
+
+    if (lane_id == 0 && warp_id_per_row > 0)
+        sm_l[row_tile_idx * (col_num_warps - 1)  + (warp_id_per_row - 1)] = acc_attn;
+
+    __syncthreads();
+
+    if (warp_id_per_row == 0) {
+        // if not the first column, and column is less than the number of warps per row
+        // then get from shared memory, set everything else but the first column to 0.
+
+        if (col_tile_idx > 0 && col_tile_idx < col_num_warps) {
+            acc_attn = sm_l[row_tile_idx * col_num_warps + (col_tile_idx - 1)];
+        } else if (col_tile_idx != 0) {
+            acc_attn = 0;
+        }
 
         for (int offset = 16; offset > 0; offset >>= 1) {
             acc_attn += __shfl_down_sync(shfl_mask, acc_attn, offset);
         }
-
-        if (lane_id == 0 && warp_id_per_row > 0)
-            sm_l[row_tile_idx * (col_num_warps - 1)  + (warp_id_per_row - 1)] = acc_attn;
-
-        __syncthreads();
-
-        if (warp_id_per_row == 0) {
-            // if not the first column, and column is less than the number of warps per row
-            // then get from shared memory, set everything else but the first column to 0.
-
-            if (col_tile_idx > 0 && col_tile_idx < col_num_warps) {
-                acc_attn = sm_l[row_tile_idx * col_num_warps + (col_tile_idx - 1)];
-            } else if (col_tile_idx != 0) {
-                acc_attn = 0;
-            }
-
-            for (int offset = 16; offset > 0; offset >>= 1) {
-                acc_attn += __shfl_down_sync(shfl_mask, acc_attn, offset);
-            }
-        }
-
-        // write row sum (accumulated by thread of first column per row) to global memory
-
-        if (should_calculate_row && col_tile_idx == 0)
-            l_[global_row] = acc_attn;
     }
+
+    // write row sum (accumulated by thread of first column per row) to global memory
+
+    if (should_calculate_row && col_tile_idx == 0)
+        l_[global_row] = acc_attn;
 }
 
 // forwards c++ function
@@ -279,7 +274,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
     bool causal,
     int row_tile_size,
     int col_tile_size,
-    int row_tiles,
     int col_tiles
 ) {
 
@@ -299,6 +293,8 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
 
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
+
+    const int row_tiles = cdiv(seq, row_tile_size);
 
     const dim3 blocks(batch * heads, row_tiles * col_tiles);
     const dim3 threads_per_block(col_tile_size, row_tile_size);
@@ -325,7 +321,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_forward(
             has_attn_bias,
             row_tile_size,
             col_tile_size,
-            row_tiles,
             col_tiles
         );
     }));
