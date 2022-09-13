@@ -66,7 +66,7 @@ for batch, heads, seq, dim in permutations:
         k,
         v,
         row_tile_size = 32,
-        col_tile_size = 32,
+        col_tile_size = 32
     )
 
     baseline_time = attention_fn(q, k, v)

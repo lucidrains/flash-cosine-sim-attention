@@ -34,9 +34,7 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 So far cosine similarity attention is not widely used in industry. The only large model that has been trained with it so far is <a href="https://arxiv.org/abs/2111.09883">SwinV2</a>. If anyone can invalidate the approach, please open an issue or send me an email. You can run experiments against regular attention using the <a href="https://github.com/lucidrains/x-transformers#grouped-query-key-l2-normalization">x-transformers</a> repository.
 
-This will be my first attempt at CUDA, so welcome any help or advice.
-
-Update: Meta AI will be <a href="https://github.com/facebookresearch/xformers/pull/362#issuecomment-1212924962">considering merging the flash attention</a> implementation into Pytorch core. They have also done experiments on a variety of models and show that it is free from numerical issues. I suppose there is less a case for the cosine similarity variant other than that it could potentially be slightly faster. I will still complete it for my own GPGPU education.
+Update: <a href="https://github.com/borisdayma">Boris Dayma</a> has graciously kicked off <a href="https://wandb.ai/dalle-mini/dalle-mini/reports/Fix-Swin-v2--VmlldzoyNDA4Mzc3">an experiment (blue with red as baseline)</a> to validate cosine similarity attention with a fixed scale of 10 in a real-world model setting. 🙏
 
 ## Testing
 

@@ -19,8 +19,10 @@ def benchmark(
         # warmup
 
         for _ in range(warmup_iters):
-            loss = fn(*args, **kwargs).sum()
-            loss.backward()
+            loss = fn(*args, **kwargs)
+
+            if backwards:
+                loss.sum().backward()
 
         # average across number of function calls
 
