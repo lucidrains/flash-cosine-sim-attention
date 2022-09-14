@@ -101,7 +101,7 @@ __global__ void forward_kernel(
 
     // for warp reducing
 
-    const int lane_id = threadIdx.x % 32;
+    const int lane_id = threadIdx.x & 31;
     const int col_num_warps = col_tile_size / 32;
     const int warp_id_per_row = col_tile_idx / 32;
 
@@ -201,7 +201,7 @@ __global__ void forward_kernel(
         if (should_calculate_attn) {
             for (int d = 0; d < k_dim; d++) {
                 // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
-                int dmod = (d + (threadIdx.x % 32)) % k_dim;
+                int dmod = (d + lane_id) % k_dim;
                 attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
             }
 
@@ -356,7 +356,7 @@ __global__ void backward_calculate_do_scaled(
     const int dim_idx = threadIdx.x;
 
     const int warp_id = threadIdx.x / 32;
-    const int lane = threadIdx.x % 32;
+    const int lane_id = threadIdx.x & 31;
 
     const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
 
@@ -381,14 +381,14 @@ __global__ void backward_calculate_do_scaled(
         val += __shfl_down_sync(mask, val, offset);
     }
 
-    if (lane == 0)
+    if (lane_id == 0)
         sm_do_scaled[warp_id] = val;
 
     __syncthreads();
 
     if (warp_id == 0) {
         if (dim_idx < (blockDim.x / 32)) {
-            val = sm_do_scaled[lane];
+            val = sm_do_scaled[lane_id];
         } else{
             val = 0;
         }
@@ -448,6 +448,8 @@ __global__ void backward_kernel(
 
     const int col_tile_idx = threadIdx.x;
     const int row_tile_idx = threadIdx.y;
+
+    const int lane_id = threadIdx.x & 31;
 
     const int thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
     const int tpb = blockDim.x * blockDim.y;
@@ -569,7 +571,7 @@ __global__ void backward_kernel(
             if (should_calculate_attn) {
                 for (int d = 0; d < k_dim; d++) {
                     // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
-                    int dmod = (d + (threadIdx.x % 32)) % k_dim;
+                    int dmod = (d + lane_id) % k_dim;
                     attn += sm_q[sm_q_offset + dmod] * sm_k[sm_k_offset + dmod];
                 }
 
