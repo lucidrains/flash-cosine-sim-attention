@@ -282,10 +282,12 @@ struct out_mma_warp_tile {
     __device__ void store(float* C_sm_ptr) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
+            float inv_rowsum = 1.f / max(L_frag[i], EPS);
+
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
                 C_sm_ptr[(thread_y + i * N_warp) * M_tile + j * M_warp + thread_x]
-                  = C_frag[i * M_thread + j] / max(L_frag[i], EPS);
+                  = C_frag[i * M_thread + j] * inv_rowsum;
             }
         }
     }
@@ -306,10 +308,12 @@ struct out_mma_warp_tile {
     __device__ void store_transpose(float* C_sm_ptr) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
+            float inv_rowsum = 1.f / max(L_frag[i], EPS);
+
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
                 C_sm_ptr[thread_y + i * N_warp + (j * M_warp + thread_x) * N_tile]
-                  = C_frag[i * M_thread + j] / max(L_frag[i], EPS);
+                  = C_frag[i * M_thread + j] * inv_rowsum;
             }
         }
     }
@@ -411,14 +415,15 @@ struct smem_fragment {
 
 // forward kernel
 
+template<typename scalar_t>
 __global__ void forward_kernel(
-    const PackedAccessor<float, 4> Q,
-    const PackedAccessor<float, 4> K,
-    const PackedAccessor<float, 4> V,
-          PackedAccessor<float, 4> O,
-          PackedAccessor<float, 3> L,
+    const PackedAccessor<scalar_t, 4> Q,
+    const PackedAccessor<scalar_t, 4> K,
+    const PackedAccessor<scalar_t, 4> V,
+          PackedAccessor<scalar_t, 4> O,
+          PackedAccessor<scalar_t, 3> L,
     const PackedAccessor<bool, 2> mask,
-    const PackedAccessor<float, 3> attn_bias,
+    const PackedAccessor<scalar_t, 3> attn_bias,
     const float scale,
     const bool causal,
     const bool has_mask,
@@ -494,7 +499,7 @@ __global__ void forward_kernel(
             if (global_row >= N || global_col >= M)
                 return 0.f;
 
-            bias = has_attn_bias ? attn_bias_[global_row][global_col] : 0.f;
+            bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
 
             if (causal && (global_row < (global_col - MN_DIFF)))
                 return 0.f;
@@ -565,14 +570,14 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     const bool has_mask = !!mask.numel();
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(Q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
-        forward_kernel<<<blocks, threads_per_block, shared_mem_size>>>(
-            ACCESSOR(Q, 4, float),
-            ACCESSOR(K, 4, float),
-            ACCESSOR(V, 4, float),
-            ACCESSOR(O, 4, float),
-            ACCESSOR(L, 3, float),
+        forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
+            ACCESSOR(Q, 4, scalar_t),
+            ACCESSOR(K, 4, scalar_t),
+            ACCESSOR(V, 4, scalar_t),
+            ACCESSOR(O, 4, scalar_t),
+            ACCESSOR(L, 3, scalar_t),
             ACCESSOR(mask, 2, bool),
-            ACCESSOR(attn_bias, 3, float),
+            ACCESSOR(attn_bias, 3, scalar_t),
             scale,
             causal,
             has_mask,
