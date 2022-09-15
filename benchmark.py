@@ -24,7 +24,7 @@ BATCH_SIZES = (2, 4, 8)
 HEADS = 4
 DIM = 64
 
-TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048)
+TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192)
 
 TEST_FORWARDS = not args.only_backwards
 TEST_BACKWARDS = not args.only_forwards
@@ -64,8 +64,13 @@ for batch, heads, dim in permutations:
 
         fused_time = fused_attention_fn(q, k, v)
 
-        baseline_time = attention_fn(q, k, v)
+        try:
+            baseline_time = attention_fn(q, k, v)
+        except:
+            torch.cuda.empty_cache()
+            baseline_time = -1
 
-        times_slower = fused_time / baseline_time
+        times_slower = (fused_time / baseline_time) if baseline_time != -1 else 0.
+        baseline_time_str = 'oom' if baseline_time == -1 else f"{baseline_time:.2f}ms"
 
-        print(f'\nslower: {times_slower:.2f}x\tseq_len: {seq}\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time:.2f}ms\n')
+        print(f'seq_len: {seq}\tslower: {times_slower:.2f}x\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time_str}')
