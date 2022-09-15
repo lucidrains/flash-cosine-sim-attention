@@ -42,7 +42,7 @@ def plain_cosine_sim_attention(
     v: TensorType['b', 'h', 'j', 'd'],
     mask: Optional[TensorType['b', 'j']] = None,
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
-    scale = 8,
+    scale = 10,
     causal = False,
     l2norm_qk = True
 
@@ -81,18 +81,14 @@ class FlashCosineSimAttention(Function):
         attn_bias,
         scale,
         causal,
-        row_tile_size,
-        col_tile_size,
-        col_tiles,
         backward_row_tile_size,
         backward_col_tile_size,
         backward_row_tiles,
         backward_col_tiles
     ):
-        assert col_tiles == 1 and backward_col_tiles == 1
-        assert divisible_by(col_tile_size, 32)
+        assert backward_col_tiles == 1
+        assert v.shape[-1] == 64, 'value dimension is fixed at 64 for now'
 
-        assert row_tile_size == col_tile_size
         assert backward_row_tile_size == backward_col_tile_size
 
         batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
@@ -106,13 +102,8 @@ class FlashCosineSimAttention(Function):
             mask,
             attn_bias,
             scale,
-            causal,
-            row_tile_size,
-            col_tile_size,
-            col_tiles
+            causal
         )
-
-        o.div_(l[..., None].clamp(min = 1e-20))
 
         ctx.save_for_backward(o, l, q, k, v, mask, attn_bias)
 
@@ -170,12 +161,9 @@ def flash_cosine_sim_attention(
     v: TensorType['b', 'h', 'j', 'd'],
     mask: Optional[TensorType['b', 'j']] = None,
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
-    scale = 8,
+    scale = 10,
     causal = False,
     l2norm_qk = True,
-    row_tile_size = 32,
-    col_tile_size = 32,
-    col_tiles = 1,
     backward_row_tile_size = 16,
     backward_col_tile_size = 16,
     backward_row_tiles = 1,
@@ -193,9 +181,6 @@ def flash_cosine_sim_attention(
         attn_bias,
         scale,
         causal,
-        row_tile_size,
-        col_tile_size,
-        col_tiles,
         backward_row_tile_size,
         backward_col_tile_size,
         backward_row_tiles,
