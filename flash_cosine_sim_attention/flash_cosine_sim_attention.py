@@ -97,13 +97,21 @@ class FlashCosineSimAttention(Function):
 
         attn_bias = default(attn_bias, torch.empty(1, 0, 0, device = q.device, dtype = dtype))
 
+        should_backwards = any([*map(lambda t: t.requires_grad, (q, k, v, attn_bias))])
+
         o, l = forward(
             q, k, v,
             mask,
             attn_bias,
             scale,
-            causal
+            causal,
+            should_backwards
         )
+
+        ctx.should_backwards = should_backwards
+
+        if not ctx.should_backwards:
+            return o
 
         ctx.save_for_backward(o, l, q, k, v, mask, attn_bias)
 
@@ -120,6 +128,8 @@ class FlashCosineSimAttention(Function):
 
     @staticmethod
     def backward(ctx, do):
+        assert ctx.should_backwards
+
         o, l, q, k, v, mask, attn_bias = ctx.saved_tensors
 
         batch, heads, src_seq, tgt_seq, device, dtype = *q.shape[:3], k.shape[2], q.device, q.dtype

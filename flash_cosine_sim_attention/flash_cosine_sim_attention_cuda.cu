@@ -427,7 +427,8 @@ __global__ void forward_kernel(
     const float scale,
     const bool causal,
     const bool has_mask,
-    const bool has_attn_bias
+    const bool has_attn_bias,
+    const bool need_store_rowsum
 ) {
     const int H = Q.size(1);
     const int N = Q.size(2);
@@ -527,7 +528,8 @@ __global__ void forward_kernel(
 
     __syncthreads();
 
-    out_mma.store_rowsum(L_, tile_y, N);
+    if (need_store_rowsum)
+        out_mma.store_rowsum(L_, tile_y, N);
 
     O_sm.store(O_, 0, tile_y, N);
 }
@@ -541,7 +543,8 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor mask,
     torch::Tensor attn_bias,
     float scale,
-    bool causal
+    bool causal,
+    bool need_store_rowsum
 ) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(Q));
 
@@ -555,7 +558,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     auto options = torch::TensorOptions().device(device_of(Q)).dtype(torch::kFloat);
 
     auto O = at::empty({batch, heads, N, E}, options);
-    auto L = at::empty({batch, heads, N}, options);
+    auto L = at::empty({batch, heads, need_store_rowsum ? N : 0}, options);
 
     const dim3 threads_per_block(256);
     const dim3 blocks(cdiv(N, mma_warp_tile::N_tile), batch * heads);
@@ -581,7 +584,8 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
             scale,
             causal,
             has_mask,
-            has_attn_bias
+            has_attn_bias,
+            need_store_rowsum
         );
     }));
 
