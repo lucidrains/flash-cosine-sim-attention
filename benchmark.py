@@ -4,6 +4,8 @@ from itertools import product
 from flash_cosine_sim_attention.benchmark import benchmark
 from flash_cosine_sim_attention import plain_cosine_sim_attention, flash_cosine_sim_attention
 
+assert torch.cuda.is_available(), 'cuda must be available to run benchmark'
+
 # helper functions
 
 def cast_tuple(t):
