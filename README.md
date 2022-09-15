@@ -14,6 +14,7 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [ ] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 - [ ] make sure value dimensions can be 16, 32, 64, or 128 using the templating strategy recommended by Arthur
 - [ ] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
+- [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 
 ## Appreciation
 
