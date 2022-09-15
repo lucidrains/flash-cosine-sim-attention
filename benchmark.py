@@ -22,8 +22,9 @@ assert not (args.only_forwards and args.only_backwards)
 
 BATCH_SIZES = (2, 4, 8)
 HEADS = 4
-TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048)
 DIM = 64
+
+TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048)
 
 TEST_FORWARDS = not args.only_backwards
 TEST_BACKWARDS = not args.only_forwards
@@ -46,31 +47,25 @@ attention_fn = benchmark(
 params = dict((
     ('batch size', BATCH_SIZES),
     ('heads', HEADS),
-    ('sequence lengths', TEST_SEQUENCE_LENGTHS),
     ('feature dimension', DIM)
 ))
 
 permutations = list(product(*map(cast_tuple, params.values())))
 
-for batch, heads, seq, dim in permutations:
-    print('-' * 60)
-    print(f'batch: {batch}\theads: {heads}\tseq: {seq}\tdim {dim}\t')
-    print('-' * 60)
+for batch, heads, dim in permutations:
+    print('-' * 40)
+    print(f'batch: {batch}\theads: {heads}\tdim {dim}\t')
+    print('-' * 40)
 
-    q = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
-    k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
-    v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
+    for seq in TEST_SEQUENCE_LENGTHS:
+        q = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
+        k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
+        v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
 
-    fused_time = fused_attention_fn(
-        q,
-        k,
-        v,
-        row_tile_size = 32,
-        col_tile_size = 32
-    )
+        fused_time = fused_attention_fn(q, k, v)
 
-    baseline_time = attention_fn(q, k, v)
+        baseline_time = attention_fn(q, k, v)
 
-    times_slower = fused_time / baseline_time
+        times_slower = fused_time / baseline_time
 
-    print(f'\nslower: {times_slower:.2f}x\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time:.2f}ms\n')
+        print(f'\nslower: {times_slower:.2f}x\tseq_len: {seq}\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time:.2f}ms\n')
