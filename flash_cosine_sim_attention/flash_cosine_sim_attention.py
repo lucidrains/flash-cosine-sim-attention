@@ -143,16 +143,14 @@ class FlashCosineSimAttention(Function):
             backward_col_tiles
         ) = ctx.params
 
-        db = torch.zeros((heads, src_seq, tgt_seq), device = device, dtype = dtype) if attn_bias.requires_grad else torch.zeros((heads, 0, 0), device = device, dtype = dtype)
-
-        dq, dk, dv = backward(
+        dq, dk, dv, db = backward(
             do, o, l,
             q, k, v,
-            db,
             mask,
             attn_bias,
             scale,
             causal,
+            attn_bias.requires_grad,
             backward_row_tile_size,
             backward_col_tile_size,
             backward_row_tiles,

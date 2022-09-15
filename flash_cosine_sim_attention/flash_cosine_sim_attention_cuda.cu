@@ -604,10 +604,11 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 // done by @ptillet at https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
 
 template <typename scalar_t>
-__global__ void backward_calculate_do_scaled(
+__global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-          PackedAccessor<scalar_t, 3> do_scaled
+          PackedAccessor<scalar_t, 4> d_out_scaled,
+          PackedAccessor<scalar_t, 3> delta
 ) {
     const int heads = o.size(1);
     const int v_dim = o.size(3);
@@ -626,11 +627,11 @@ __global__ void backward_calculate_do_scaled(
 
     extern __shared__ float _shared_mem_preprocess[];
 
-    float* sm_do_scaled = (float*) &_shared_mem_preprocess;
+    float* sm_delta = (float*) &_shared_mem_preprocess;
 
     auto do_ = d_out[batch_idx][head_idx][seq_idx];
     auto o_ = o[batch_idx][head_idx][seq_idx];
-    auto do_scaled_ = do_scaled[batch_idx][head_idx];
+    auto delta_ = delta[batch_idx][head_idx];
 
     // load into shared memory
 
@@ -644,13 +645,13 @@ __global__ void backward_calculate_do_scaled(
     }
 
     if (lane_id == 0)
-        sm_do_scaled[warp_id] = val;
+        sm_delta[warp_id] = val;
 
     __syncthreads();
 
     if (warp_id == 0) {
         if (dim_idx < (blockDim.x / 32)) {
-            val = sm_do_scaled[lane_id];
+            val = sm_delta[lane_id];
         } else{
             val = 0;
         }
@@ -660,7 +661,7 @@ __global__ void backward_calculate_do_scaled(
         }
 
         if (dim_idx == 0) {
-            do_scaled_[seq_idx] = val;
+            delta_[seq_idx] = val;
         }
     }
 }
@@ -679,12 +680,14 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dv,
           PackedAccessor<scalar_t, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out,
-    const PackedAccessor<scalar_t, 3> do_scaled,
+    const PackedAccessor<scalar_t, 4> d_out_scaled,
+    const PackedAccessor<scalar_t, 3> delta,
     const PackedAccessor<scalar_t, 3> l,
     const float scale,
     const bool causal,
     const bool has_mask,
     const bool has_attn_bias,
+    const bool attn_bias_requires_grad,
     const int row_tile_size,
     const int col_tile_size,
     const int row_tiles,
@@ -731,7 +734,7 @@ __global__ void backward_kernel(
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
     auto ds_ = d_attn_bias[head_idx];
-    auto do_scaled_ = do_scaled[batch_idx][head_idx];
+    auto delta_ = delta[batch_idx][head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto do_ = d_out[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
@@ -754,8 +757,8 @@ __global__ void backward_kernel(
     float* sm_k = (float*) &sm_q[row_tile_size * k_dim];
     float* sm_v = (float*) &sm_k[col_tile_size * k_dim];
     float* sm_l = (float*) &sm_v[col_tile_size * v_dim];
-    float* sm_do_scaled = (float*) &sm_l[row_tile_size];
-    float* sm_do = (float*) &sm_do_scaled[row_tile_size];
+    float* sm_delta = (float*) &sm_l[row_tile_size];
+    float* sm_do = (float*) &sm_delta[row_tile_size];
 
     // loop
 
@@ -820,7 +823,7 @@ __global__ void backward_kernel(
             }
 
             if (col_tile_idx == 0) {
-                sm_do_scaled[row_tile_idx] = do_scaled_[global_row];
+                sm_delta[row_tile_idx] = delta_[global_row];
                 sm_l[row_tile_idx] = l_[global_row];
             }
 
@@ -867,11 +870,11 @@ __global__ void backward_kernel(
             float dS = 0;
 
             if (should_calculate_attn) {
-                float D = sm_do_scaled[row_tile_idx];
+                float D = sm_delta[row_tile_idx];
 
                 dS = attn * (dp - D);
 
-                if (has_attn_bias) {
+                if (has_attn_bias && attn_bias_requires_grad) {
                     atomicAdd((float*) &ds_[global_row][global_col], dS);
                 }
             }
@@ -904,11 +907,11 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
-    torch::Tensor d_attn_bias,
     torch::Tensor mask,
     torch::Tensor attn_bias,
     float scale,
     bool causal,
+    bool attn_bias_requires_grad,
     int row_tile_size,
     int col_tile_size,
     int row_tiles,
@@ -924,18 +927,21 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const bool has_attn_bias = !!d_attn_bias.numel();
+    const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
 
     auto options = torch::TensorOptions().device(query_device).dtype(torch::kFloat);
 
     // setup dq, dk, dv
 
-    auto do_scaled = at::empty_like(l, options);
+    auto d_out_scaled = at::empty_like(d_out, options);
+    auto delta = at::empty_like(l, options);
 
     auto dq = at::zeros_like(q, options);
     auto dk = at::zeros_like(k, options);
     auto dv = at::zeros_like(v, options);
+
+    auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias) : at::empty({attn_bias.size(0), 0, 0}, options);
 
     // setup backwards preprocess call
 
@@ -956,10 +962,11 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                                                 ) * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
-        backward_calculate_do_scaled<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
+        backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
             ACCESSOR(d_out, 4, scalar_t),
             ACCESSOR(o, 4, scalar_t),
-            ACCESSOR(do_scaled, 3, scalar_t)
+            ACCESSOR(d_out_scaled, 4, scalar_t),
+            ACCESSOR(delta, 3, scalar_t)
         );
 
         backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
@@ -971,14 +978,16 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(dq, 4, scalar_t),
             ACCESSOR(dk, 4, scalar_t),
             ACCESSOR(dv, 4, scalar_t),
-            ACCESSOR(d_attn_bias, 3, scalar_t),
+            ACCESSOR(db, 3, scalar_t),
             ACCESSOR(d_out, 4, scalar_t),
-            ACCESSOR(do_scaled, 3, scalar_t),
+            ACCESSOR(d_out_scaled, 4, scalar_t),
+            ACCESSOR(delta, 3, scalar_t),
             ACCESSOR(l, 3, scalar_t),
             scale,
             causal,
             has_mask,
             has_attn_bias,
+            attn_bias_requires_grad,
             row_tile_size,
             col_tile_size,
             row_tiles,
@@ -992,7 +1001,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     CHECK_LAST_CUDA_ERROR();
 
-    return {dq, dk, dv};
+    return {dq, dk, dv, db};
 }
 
 // bind
