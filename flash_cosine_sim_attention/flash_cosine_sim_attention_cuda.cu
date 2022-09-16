@@ -146,10 +146,7 @@ struct mma_warp_tile {
         #pragma unroll
         for (int j = 0; j < M_thread ; j++) {
 
-            bool is_masked_out = false;
-            if (has_mask) {
-                is_masked_out = B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE;
-            }
+            bool is_masked_out = (B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE) || false;
 
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
@@ -164,10 +161,13 @@ struct mma_warp_tile {
 
     // Perform a pointwise operation, specified by the given lambda, on C
     template<typename F>
-    __device__ void pointwise(F&& op) {
+    __device__ void pointwise(int tile_y, int tile_x, F&& op) {
         #pragma unroll
         for (int i = 0; i < N_thread * M_thread; i++) {
-            C_frag[i] = op(C_frag[i], i);
+            int global_row = tile_y * N_tile + (i / M_thread) * N_warp + thread_y;
+            int global_col = tile_x * M_tile + (i % M_thread) * M_warp + thread_x;
+
+            C_frag[i] = op(C_frag[i], global_row, global_col);
         }
     }
 
@@ -521,9 +521,7 @@ __global__ void forward_kernel(
             QK_mma.mma(Q_sm.smem, K_sm.smem, d, has_mask);
         }
 
-        QK_mma.pointwise([&](float el, int index) {
-            global_row = tile_y * QK_mma.N_tile + (index / QK_mma.M_thread) * QK_mma.N_warp + QK_mma.thread_y;
-            global_col = tile_x * QK_mma.M_tile + (index % QK_mma.M_thread) * QK_mma.M_warp + QK_mma.thread_x;
+        QK_mma.pointwise(tile_y, tile_x, [&](float el, int global_row, int global_col) {
 
             if (global_row >= N || global_col >= M)
                 return 0.f;
