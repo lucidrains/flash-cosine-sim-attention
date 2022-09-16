@@ -60,10 +60,10 @@ bool divisible_by(int num, int denom) {
 
 // mma
 
+template<int tmpl_N_thread, int tmpl_M_thread>
 struct mma_warp_tile {
-    // How much data is processed by a single thread:
-    static constexpr int N_thread = 4;
-    static constexpr int M_thread = 4;
+    static constexpr int N_thread = tmpl_N_thread;
+    static constexpr int M_thread = tmpl_M_thread;
 
     // Thread layout within a warp:
     static constexpr int N_warp = 8;
@@ -469,23 +469,25 @@ __global__ void forward_kernel(
     auto L_ = L[batch][heads];
     auto attn_bias_ = attn_bias[heads];
 
+    // mma
+
+    mma_warp_tile<4, 4> QK_mma; // 32x16 tile per warp in registers -> process 64x64 with the block
+    out_mma_warp_tile out_mma;
+
     // tiles
 
-    const int tile_w = cdiv(M, mma_warp_tile::M_tile);
+    const int tile_w = cdiv(M, QK_mma.M_tile);
     const int tile_y = blockIdx.x;
 
     // shared memory
 
     extern __shared__ float _shared_mem[];
 
-    mma_warp_tile QK_mma; // 32x16 tile per warp in registers -> process 64x64 with the block
-    out_mma_warp_tile out_mma;
-
-    smem_fragment<float> Q_sm{_shared_mem, mma_warp_tile::N_tile, D};
-    smem_fragment<float> O_sm{_shared_mem, mma_warp_tile::N_tile, E};
-    smem_fragment<float> A_sm{(E > D ? O_sm.next() : A_sm.next()), mma_warp_tile::N_tile, mma_warp_tile::M_tile};
-    smem_fragment<float> K_sm{A_sm.next(), mma_warp_tile::M_tile, D};
-    smem_fragment<float> V_sm{A_sm.next(), mma_warp_tile::M_tile, E};
+    smem_fragment<float> Q_sm{_shared_mem, QK_mma.N_tile, D};
+    smem_fragment<float> O_sm{_shared_mem, QK_mma.N_tile, E};
+    smem_fragment<float> A_sm{(E > D ? O_sm.next() : A_sm.next()), QK_mma.N_tile, QK_mma.M_tile};
+    smem_fragment<float> K_sm{A_sm.next(), QK_mma.M_tile, D};
+    smem_fragment<float> V_sm{A_sm.next(), QK_mma.M_tile, E};
 
     // helper variables
 
@@ -499,22 +501,22 @@ __global__ void forward_kernel(
     Q_sm.load_transpose(Q_, 0, tile_y, N);
 
     for (int tile_x = 0; tile_x < tile_w; tile_x++) {
-        if (causal && (mma_warp_tile::M_tile * tile_x - MN_DIFF) >= (mma_warp_tile::N_tile * (tile_y + 1)))
+        if (causal && (QK_mma.M_tile * tile_x - MN_DIFF) >= (QK_mma.N_tile * (tile_y + 1)))
             continue;
 
-        K_sm.load_transpose(K_, 0, tile_x, has_mask, mask[batch], mma_warp_tile::IS_NULL_FLOAT, M);
+        K_sm.load_transpose(K_, 0, tile_x, has_mask, mask[batch], QK_mma.IS_NULL_FLOAT, M);
 
         __syncthreads();
 
         QK_mma.zero();
 
         for (int d = 0; d < D; d++) {
-            QK_mma.mma(Q_sm.smem, K_sm.smem, d, has_mask, mma_warp_tile::IS_NULL_FLOAT);
+            QK_mma.mma(Q_sm.smem, K_sm.smem, d, has_mask, QK_mma.IS_NULL_FLOAT);
         }
 
         QK_mma.pointwise([&](float el, int index) {
-            global_row = tile_y * mma_warp_tile::N_tile + (index / mma_warp_tile::M_thread) * mma_warp_tile::N_warp + QK_mma.thread_y;
-            global_col = tile_x * mma_warp_tile::M_tile + (index % mma_warp_tile::M_thread) * mma_warp_tile::M_warp + QK_mma.thread_x;
+            global_row = tile_y * QK_mma.N_tile + (index / QK_mma.M_thread) * QK_mma.N_warp + QK_mma.thread_y;
+            global_col = tile_x * QK_mma.M_tile + (index % QK_mma.M_thread) * QK_mma.M_warp + QK_mma.thread_x;
 
             if (global_row >= N || global_col >= M)
                 return 0.f;
@@ -536,7 +538,7 @@ __global__ void forward_kernel(
 
         __syncthreads();
 
-        for (int d = 0; d < mma_warp_tile::M_tile; d++) {
+        for (int d = 0; d < QK_mma.M_tile; d++) {
             out_mma.mma(A_sm.smem, V_sm.smem, d);
         }
 
@@ -575,14 +577,16 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     auto O = at::empty({batch, heads, N, E}, options);
     auto L = at::empty({batch, heads, need_store_rowsum ? N : 0}, options);
 
+    using mma_warp_tile_klass = mma_warp_tile<4, 4>;
+
     const dim3 threads_per_block(256);
-    const dim3 blocks(cdiv(N, mma_warp_tile::N_tile), batch * heads);
+    const dim3 blocks(cdiv(N, mma_warp_tile_klass::N_tile), batch * heads);
 
     const int max_feature_dimension = max(D, E);
 
-    const unsigned shared_mem_size = (mma_warp_tile::N_tile * max_feature_dimension +
-                                      mma_warp_tile::M_tile * max_feature_dimension +
-                                      mma_warp_tile::N_tile * mma_warp_tile::M_tile) * sizeof(float);
+    const unsigned shared_mem_size = (mma_warp_tile_klass::N_tile * max_feature_dimension +
+                                      mma_warp_tile_klass::M_tile * max_feature_dimension +
+                                      mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile) * sizeof(float);
 
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
@@ -605,7 +609,9 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     }));
 
     // handle error
+
     cudaDeviceSynchronize();
+
     CHECK_LAST_CUDA_ERROR();
 
     return { O, L };
