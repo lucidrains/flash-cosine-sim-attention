@@ -64,15 +64,6 @@ __host__ __device__ int next_pow_2(int n) {
     return i;
 }
 
-__device__ void warp_reduce(volatile float* sm, int tid, int max) {
-    for (int s = 32; s > 0; s>>=1) {
-        if ((tid + s) >= max)
-            continue;
-
-        sm[tid] += sm[tid + s];
-    }
-}
-
 bool divisible_by(int num, int denom) {
     return (num % denom) == 0;
 }
