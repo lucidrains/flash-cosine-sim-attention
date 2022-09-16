@@ -314,7 +314,7 @@ struct out_mma_warp_tile {
     }
 
     template<typename accessor>
-    __device__ void store(accessor gmem, int tile_x, int tile_y, int max_y) {
+    __device__ void store(accessor gmem, int tile_y, int max_y) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
             float inv_rowsum = 1.f / max(L_frag[i], EPS);
@@ -322,7 +322,7 @@ struct out_mma_warp_tile {
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
                 int gmem_y = thread_y + i * N_warp + tile_y * N_tile;
-                int gmem_x = thread_x + j * M_warp + tile_x * M_tile;
+                int gmem_x = thread_x + j * M_warp;
 
                 if (gmem_y >= max_y)
                     continue;
@@ -376,17 +376,16 @@ struct smem_fragment {
     }
 
     template<typename accessor>
-    __device__ void load(accessor gmem, int tile_x, int tile_y, int max_y) {
+    __device__ void load(accessor gmem, int tile_y, int max_y) {
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
             int x = i % M;
             int y = i / M;
             int gmem_y = y + tile_y * N;
-            int gmem_x = x + tile_x * M;
 
             if (gmem_y >= max_y)
                 continue;
 
-            smem[i] = gmem[gmem_y][gmem_x];
+            smem[i] = gmem[gmem_y][x];
         }
     }
 
@@ -403,30 +402,28 @@ struct smem_fragment {
     }
 
     template<typename accessor>
-    __device__ void load_transpose(accessor gmem, int tile_x, int tile_y, int max_y) {
+    __device__ void load_transpose(accessor gmem, int tile_y, int max_y) {
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
             int y = i % M;
             int x = i / M;
             int gmem_y = x + tile_y * N;
-            int gmem_x = y + tile_x * M;
 
             if (gmem_y >= max_y)
                 continue;
 
-            smem[y * N + x] = gmem[gmem_y][gmem_x];
+            smem[y * N + x] = gmem[gmem_y][y];
         }
     }
 
     template<typename accessor, typename accessor_mask>
-    __device__ void load_transpose(accessor gmem, int tile_x, int tile_y, bool has_mask, accessor_mask mask, const float is_null_float, int max_y) {
+    __device__ void load_transpose(accessor gmem, int tile_y, bool has_mask, accessor_mask mask, const float is_null_float, int max_y) {
         if (!has_mask)
-            return load_transpose(gmem, tile_x, tile_y, max_y);
+            return load_transpose(gmem, tile_y, max_y);
 
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
             int y = i % M;
             int x = i / M;
             int gmem_y = x + tile_y * N;
-            int gmem_x = y + tile_x * M;
 
             if (y == 0 && !mask[gmem_y]) {
                 smem[y * N + x] = is_null_float;
@@ -436,7 +433,7 @@ struct smem_fragment {
             if (gmem_y >= max_y)
                 continue;
 
-            smem[y * N + x] = gmem[gmem_y][gmem_x];
+            smem[y * N + x] = gmem[gmem_y][y];
         }
     }
 
@@ -530,13 +527,13 @@ __global__ void forward_kernel(
 
     out_mma.zero();
 
-    Q_sm.load_transpose(Q_, 0, tile_y, N);
+    Q_sm.load_transpose(Q_, tile_y, N);
 
     for (int tile_x = 0; tile_x < tile_w; tile_x++) {
         if (causal && (QK_mma.M_tile * tile_x - MN_DIFF) >= (QK_mma.N_tile * (tile_y + 1)))
             continue;
 
-        K_sm.load_transpose(K_, 0, tile_x, has_mask, mask[batch], QK_mma.IS_NULL_FLOAT, M);
+        K_sm.load_transpose(K_, tile_x, has_mask, mask[batch], QK_mma.IS_NULL_FLOAT, M);
 
         __syncthreads();
 
@@ -565,8 +562,7 @@ __global__ void forward_kernel(
 
         __syncthreads();
 
-        // Second matmul:
-        V_sm.load(V_, 0, tile_x, M);
+        V_sm.load(V_, tile_x, M);
 
         __syncthreads();
 
@@ -577,7 +573,7 @@ __global__ void forward_kernel(
         __syncthreads();
     }
 
-    out_mma.store(O_, 0, tile_y, N);
+    out_mma.store(O_, tile_y, N);
 
     if (need_store_rowsum)
         out_mma.store_rowsum(L_, tile_y, N);
@@ -848,9 +844,9 @@ __global__ void backward_kernel(
         global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
         should_calculate_col = global_col < k_seq_len && (!has_mask || mask_[global_col]);
 
-        sm_k.load(k_, 0, i, k_seq_len);
+        sm_k.load(k_, i, k_seq_len);
 
-        sm_v.load(v_, 0, i, k_seq_len);
+        sm_v.load(v_, i, k_seq_len);
 
         for (int j = 0; j < num_row_tiles; j++) {
             row_tiles_offset = j * row_tile_size;
@@ -862,9 +858,9 @@ __global__ void backward_kernel(
                                     ( !causal ||
                                       (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
 
-            sm_q.load(q_, 0, j, q_seq_len);
+            sm_q.load(q_, j, q_seq_len);
 
-            sm_do.load(do_, 0, j, q_seq_len);
+            sm_do.load(do_, j, q_seq_len);
 
             sm_delta.load_1d(delta_, j, q_seq_len);
 
