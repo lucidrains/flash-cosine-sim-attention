@@ -293,6 +293,25 @@ struct out_mma_warp_tile {
     }
 
     template<typename accessor>
+    __device__ void store(accessor gmem, int tile_x, int tile_y, int max_y) {
+        #pragma unroll
+        for (int i = 0; i < N_thread; i++) {
+            float inv_rowsum = 1.f / max(L_frag[i], EPS);
+
+            #pragma unroll
+            for (int j = 0; j < M_thread ; j++) {
+                int gmem_y = thread_y + i * N_warp + tile_y * N_tile;
+                int gmem_x = thread_x + j * M_warp + tile_x * M_tile;
+
+                if (gmem_y >= max_y)
+                    continue;
+
+                gmem[gmem_y][gmem_x] = C_frag[i * M_thread + j] * inv_rowsum;
+            }
+        }
+    }
+
+    template<typename accessor>
     __device__ void store_rowsum(accessor gmem, int tile_y, int max_y) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
@@ -524,14 +543,10 @@ __global__ void forward_kernel(
         __syncthreads();
     }
 
-    out_mma.store(O_sm.smem);
-
-    __syncthreads();
+    out_mma.store(O_, 0, tile_y, N);
 
     if (need_store_rowsum)
         out_mma.store_rowsum(L_, tile_y, N);
-
-    O_sm.store(O_, 0, tile_y, N);
 }
 
 // forwards c++ function
