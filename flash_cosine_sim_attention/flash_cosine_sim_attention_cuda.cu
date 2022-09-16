@@ -77,7 +77,9 @@ bool divisible_by(int num, int denom) {
     return (num % denom) == 0;
 }
 
-// mma and smem fragment
+// constants
+
+__constant__ float NULL_FLOAT_VALUE = -3.14159e5;
 
 // mma
 
@@ -100,7 +102,6 @@ struct mma_warp_tile {
     static constexpr int N_tile = N_warp * N_block * N_thread;
     static constexpr int M_tile = M_warp * M_block * M_thread;
 
-    static constexpr float IS_NULL_FLOAT = -3.14159e6;
     static constexpr float MASK_VALUE = -1e8;
 
     // Registers:
@@ -136,8 +137,7 @@ struct mma_warp_tile {
         const scalar_t* A_sm_ptr,
         const scalar_t* B_sm_ptr,
         int k,
-        bool has_mask,
-        const float is_null_float
+        bool has_mask
     ) {
         // Load a N x 1 fragment of A from shared memory to registers:
         #pragma unroll
@@ -157,7 +157,7 @@ struct mma_warp_tile {
 
             bool is_masked_out = false;
             if (has_mask) {
-                is_masked_out = B_sm_ptr[j * M_warp + thread_x] == is_null_float;
+                is_masked_out = B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE;
             }
 
             #pragma unroll
@@ -404,7 +404,7 @@ struct smem_fragment {
     }
 
     template<typename accessor, typename accessor_mask>
-    __device__ void load_transpose(accessor gmem, int tile_y, bool has_mask, accessor_mask mask, const float is_null_float, int max_y) {
+    __device__ void load_transpose(accessor gmem, int tile_y, bool has_mask, accessor_mask mask, int max_y) {
         if (!has_mask)
             return load_transpose(gmem, tile_y, max_y);
 
@@ -414,7 +414,7 @@ struct smem_fragment {
             int gmem_y = x + tile_y * N;
 
             if (y == 0 && !mask[gmem_y]) {
-                smem[y * N + x] = is_null_float;
+                smem[y * N + x] = NULL_FLOAT_VALUE;
                 continue;
             }
 
@@ -520,14 +520,14 @@ __global__ void forward_kernel(
         if (causal && (QK_mma.M_tile * tile_x - MN_DIFF) >= (QK_mma.N_tile * (tile_y + 1)))
             continue;
 
-        K_sm.load_transpose(K_, tile_x, has_mask, mask[batch], QK_mma.IS_NULL_FLOAT, M);
+        K_sm.load_transpose(K_, tile_x, has_mask, mask[batch], M);
 
         __syncthreads();
 
         QK_mma.zero();
 
         for (int d = 0; d < D; d++) {
-            QK_mma.mma(Q_sm.smem, K_sm.smem, d, has_mask, QK_mma.IS_NULL_FLOAT);
+            QK_mma.mma(Q_sm.smem, K_sm.smem, d, has_mask);
         }
 
         QK_mma.pointwise([&](float el, int index) {
