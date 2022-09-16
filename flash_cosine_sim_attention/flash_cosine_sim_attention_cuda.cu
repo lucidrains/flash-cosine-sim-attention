@@ -390,18 +390,6 @@ struct smem_fragment {
     }
 
     template<typename accessor>
-    __device__ void load_1d(accessor gmem, int tile_y, int max_y) {
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int gmem_y = i + tile_y * N;
-
-            if (gmem_y >= max_y)
-                continue;
-
-            smem[i] = gmem[gmem_y];
-        }
-    }
-
-    template<typename accessor>
     __device__ void load_transpose(accessor gmem, int tile_y, int max_y) {
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
             int y = i % M;
@@ -438,18 +426,17 @@ struct smem_fragment {
     }
 
     template<typename accessor>
-    __device__ void store(accessor gmem, int tile_x, int tile_y, int max_y) {
+    __device__ void store(accessor gmem, int tile_y, int max_y) {
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
             int x = i % M;
             int y = i / M;
             int gmem_y = y + tile_y * N;
-            int gmem_x = x + tile_x * M;
 
             if (gmem_y >= max_y) {
                 continue;
             }
 
-            gmem[gmem_y][gmem_x] = smem[i];
+            gmem[gmem_y][x] = smem[i];
         }
     }
 
@@ -663,7 +650,7 @@ __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> o,
     const PackedAccessor<scalar_t, 3> l,
           PackedAccessor<scalar_t, 4> d_out_scaled,
-          PackedAccessor<scalar_t, 3> delta
+          PackedAccessor<scalar_t, 4> delta
 ) {
     const int heads = o.size(1);
     const int v_dim = o.size(3);
@@ -690,7 +677,7 @@ __global__ void backward_preprocess(
     auto o_ = o[batch_idx][head_idx][seq_idx];
     auto l_ = l[batch_idx][head_idx];
     auto do_scaled_ = d_out_scaled[batch_idx][head_idx][seq_idx];
-    auto delta_ = delta[batch_idx][head_idx];
+    auto delta_ = delta[batch_idx][head_idx][seq_idx];
 
     // load rowsum into shared memory
 
@@ -742,7 +729,7 @@ __global__ void backward_preprocess(
         // write out reduced rowsum(do_scaled * o)
 
         if (dim_idx == 0) {
-            delta_[seq_idx] = val;
+            delta_[0] = val;
         }
     }
 }
@@ -761,7 +748,7 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dv,
           PackedAccessor<scalar_t, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out_scaled,
-    const PackedAccessor<scalar_t, 3> delta,
+    const PackedAccessor<scalar_t, 4> delta,
     const float scale,
     const bool causal,
     const bool has_mask,
@@ -862,7 +849,7 @@ __global__ void backward_kernel(
 
             sm_do.load(do_, j, q_seq_len);
 
-            sm_delta.load_1d(delta_, j, q_seq_len);
+            sm_delta.load(delta_, j, q_seq_len);
 
             __syncthreads();
 
@@ -966,7 +953,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // setup dq, dk, dv
 
     auto d_out_scaled = at::empty_like(d_out, options);
-    auto delta = at::empty_like(l, options);
+    auto delta = at::empty({batch, heads, seq, 1}, options);
 
     auto dq = at::zeros_like(q, options);
     auto dk = at::zeros_like(k, options);
@@ -1000,7 +987,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(o, 4, scalar_t),
             ACCESSOR(l, 3, scalar_t),
             ACCESSOR(d_out_scaled, 4, scalar_t),
-            ACCESSOR(delta, 3, scalar_t)
+            ACCESSOR(delta, 4, scalar_t)
         );
 
         backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
@@ -1014,7 +1001,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(dv, 4, scalar_t),
             ACCESSOR(db, 3, scalar_t),
             ACCESSOR(d_out_scaled, 4, scalar_t),
-            ACCESSOR(delta, 3, scalar_t),
+            ACCESSOR(delta, 4, scalar_t),
             scale,
             causal,
             has_mask,
