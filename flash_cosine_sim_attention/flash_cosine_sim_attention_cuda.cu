@@ -853,7 +853,6 @@ __global__ void backward_kernel(
             __syncthreads();
 
             float attn = 0;
-            float row_sum = 0;
             float dp = 0;
 
             if (should_calculate_attn) {

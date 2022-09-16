@@ -39,14 +39,14 @@ def l2norm(t):
 def plain_cosine_sim_attention(
     q: TensorType['b', 'h', 'i', 'd'],
     k: TensorType['b', 'h', 'j', 'd'],
-    v: TensorType['b', 'h', 'j', 'd'],
+    v: TensorType['b', 'h', 'j', 'e'],
     mask: Optional[TensorType['b', 'j']] = None,
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
     causal = False,
     l2norm_qk = True
 
-) -> TensorType['b', 'h', 'i', 'd']:
+) -> TensorType['b', 'h', 'i', 'e']:
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
@@ -166,7 +166,7 @@ class FlashCosineSimAttention(Function):
 def flash_cosine_sim_attention(
     q: TensorType['b', 'h', 'i', 'd'],
     k: TensorType['b', 'h', 'j', 'd'],
-    v: TensorType['b', 'h', 'j', 'd'],
+    v: TensorType['b', 'h', 'j', 'e'],
     mask: Optional[TensorType['b', 'j']] = None,
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
@@ -176,7 +176,7 @@ def flash_cosine_sim_attention(
     backward_col_tile_size = 16,
     backward_row_tiles = 1,
     backward_col_tiles = 1,
-) -> TensorType['b', 'h', 'i', 'd']:
+) -> TensorType['b', 'h', 'i', 'e']:
 
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 

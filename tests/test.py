@@ -15,17 +15,19 @@ def allclose(a, b, atol = 1e-4):
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('dim_head', [64])
+@pytest.mark.parametrize('qk_dim_head', [32, 64])
+@pytest.mark.parametrize('v_dim_head', [64])
 def test_output_equal(
     causal,
     mask,
     attn_bias,
     seq_len,
-    dim_head
+    qk_dim_head,
+    v_dim_head
 ):
-    q = torch.randn(2, 4, seq_len, dim_head).cuda()
-    k = torch.randn(2, 4, seq_len, dim_head).cuda()
-    v = torch.randn(2, 4, seq_len, dim_head).cuda()
+    q = torch.randn(2, 4, seq_len, qk_dim_head).cuda()
+    k = torch.randn(2, 4, seq_len, qk_dim_head).cuda()
+    v = torch.randn(2, 4, seq_len, v_dim_head).cuda()
 
     attn_mask = torch.randint(0, 2, (2, seq_len), dtype = torch.bool).cuda() if mask else None
     bias = torch.randn(4, seq_len, seq_len).cuda() if attn_bias else None
@@ -38,17 +40,19 @@ def test_output_equal(
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('dim_head', [64])
+@pytest.mark.parametrize('qk_dim_head', [32, 64])
+@pytest.mark.parametrize('v_dim_head', [64])
 def test_grad_equal(
     causal,
     mask,
     attn_bias,
     seq_len,
-    dim_head
+    qk_dim_head,
+    v_dim_head
 ):
-    q = torch.randn(2, 4, seq_len, dim_head).cuda().requires_grad_()
-    k = torch.randn(2, 4, seq_len, dim_head).cuda().requires_grad_()
-    v = torch.randn(2, 4, seq_len, dim_head).cuda().requires_grad_()
+    q = torch.randn(2, 4, seq_len, qk_dim_head).cuda().requires_grad_()
+    k = torch.randn(2, 4, seq_len, qk_dim_head).cuda().requires_grad_()
+    v = torch.randn(2, 4, seq_len, v_dim_head).cuda().requires_grad_()
 
     attn_mask = torch.randint(0, 2, (2, seq_len), dtype = torch.bool).cuda() if mask else None
     bias = torch.randn(4, seq_len, seq_len).cuda().requires_grad_() if attn_bias else None
