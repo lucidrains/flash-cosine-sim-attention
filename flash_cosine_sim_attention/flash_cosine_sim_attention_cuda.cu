@@ -117,6 +117,7 @@ struct mma_warp_tile {
     }
 
     // Initialize C to all zeros
+
     __device__ void zero() {
         for (int i = 0; i < N_thread * M_thread; i++) {
             C_frag[i] = 0.f;
@@ -124,6 +125,7 @@ struct mma_warp_tile {
     }
 
     // Performs C = A * B + C
+
     __device__ void mma(
         const scalar_t* A_sm_ptr,
         const scalar_t* B_sm_ptr,
@@ -146,7 +148,44 @@ struct mma_warp_tile {
         #pragma unroll
         for (int j = 0; j < M_thread ; j++) {
 
-            bool is_masked_out = (B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE) || false;
+            bool is_masked_out = has_mask && (B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE);
+
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                if (is_masked_out) {
+                    C_frag[i * M_thread + j] = MASK_VALUE;
+                } else {
+                    C_frag[i * M_thread + j] += A_frag[i] * B_frag[j];
+                }
+            }
+        }
+    }
+
+    // Performs C = transpose(A) * B + C
+
+    __device__ void mma_transpose_a(
+        const scalar_t* A_sm_ptr,
+        const scalar_t* B_sm_ptr,
+        int k,
+        bool has_mask
+    ) {
+        // Load a N x 1 fragment of transpose(A) from shared memory to registers:
+        #pragma unroll
+        for (int i = 0; i < N_thread; i++) {
+            A_frag[i] = A_sm_ptr[(i * N_warp + thread_y) * M_tile + k];
+        }
+
+        // Load a 1 x M fragment of B from shared memory to registers:
+        #pragma unroll
+        for (int i = 0; i < M_thread; i++) {
+            B_frag[i] = B_sm_ptr[i * M_warp + thread_x + k * M_tile];
+        }
+
+        // Compute:
+        #pragma unroll
+        for (int j = 0; j < M_thread ; j++) {
+
+            bool is_masked_out = has_mask && (B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE);
 
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
@@ -160,6 +199,15 @@ struct mma_warp_tile {
     }
 
     // Perform a pointwise operation, specified by the given lambda, on C
+
+    template<typename F>
+    __device__ void pointwise(F&& op) {
+        #pragma unroll
+        for (int i = 0; i < N_thread * M_thread; i++) {
+            C_frag[i] = op(C_frag[i]);
+        }
+    }
+
     template<typename F>
     __device__ void pointwise(int tile_y, int tile_x, F&& op) {
         #pragma unroll
@@ -171,14 +219,28 @@ struct mma_warp_tile {
         }
     }
 
-    // Copy C from registers to shared memory
+    // copy from shared memory to registers in C
+
+    __device__ void load(scalar_t* C_sm_ptr) {
+        #pragma unroll
+        for (int i = 0; i < N_thread; i++) {
+            #pragma unroll
+            for (int j = 0; j < M_thread ; j++) {
+                C_frag[i * M_thread + j]
+                    = C_sm_ptr[(thread_y + i * N_warp) * M_tile + j * M_warp + thread_x];
+            }
+        }
+    }
+
+    // copy from registers to shared memory
+
     __device__ void store(scalar_t* C_sm_ptr) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
                 C_sm_ptr[(thread_y + i * N_warp) * M_tile + j * M_warp + thread_x]
-                  = C_frag[i * M_thread + j];
+                    = C_frag[i * M_thread + j];
             }
         }
     }
@@ -189,7 +251,26 @@ struct mma_warp_tile {
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
                 C_sm_ptr[thread_y + i * N_warp + (j * M_warp + thread_x) * N_tile]
-                  = C_frag[i * M_thread + j];
+                    = C_frag[i * M_thread + j];
+            }
+        }
+    }
+
+    // atomic add from registers go global memory
+
+    template<typename accessor>
+    __device__ void atomic_add(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+        #pragma unroll
+        for (int i = 0; i < N_thread; i++) {
+            #pragma unroll
+            for (int j = 0; j < M_thread ; j++) {
+                int gmem_y = thread_y + i * N_warp + tile_y * N_tile;
+                int gmem_x = thread_x + j * M_warp + tile_x * M_tile;
+
+                if (gmem_y >= max_y || gmem_x >= max_x)
+                    continue;
+
+                atomicAdd((scalar_t*) &gmem[gmem_y][gmem_x], C_frag[i * M_thread + j]);
             }
         }
     }
@@ -344,7 +425,7 @@ struct out_mma_warp_tile {
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
                 C_sm_ptr[thread_y + i * N_warp + (j * M_warp + thread_x) * N_tile]
-                  = C_frag[i * M_thread + j] * inv_rowsum;
+                    = C_frag[i * M_thread + j] * inv_rowsum;
             }
         }
     }
@@ -457,16 +538,17 @@ __global__ void forward_kernel(
     const bool has_attn_bias,
     const bool need_store_rowsum
 ) {
-    const int H = Q.size(1);
-    const int N = Q.size(2);
-    const int M = K.size(2);
+
+    const int q_seq_len = Q.size(2);
+    const int k_seq_len = K.size(2);
+    const int qk_seq_len_diff = k_seq_len - q_seq_len;  // for calculating causality when query and key lengths differ
+
     const int D = Q.size(3);
     const int E = V.size(3);
 
-    const int MN_DIFF = M - N;  // for calculating causality when query and key lengths differ
 
-    const int batch = blockIdx.y / H;
-    const int heads = blockIdx.y % H;
+    const int batch = blockIdx.y / Q.size(1);
+    const int heads = blockIdx.y % Q.size(1);
 
     // shortcut accessor
 
@@ -484,7 +566,7 @@ __global__ void forward_kernel(
 
     // tiles
 
-    const int tile_w = cdiv(M, QK_mma.M_tile);
+    const int num_col_tiles = cdiv(k_seq_len, QK_mma.M_tile);
     const int tile_y = blockIdx.x;
 
     // shared memory
@@ -505,13 +587,13 @@ __global__ void forward_kernel(
 
     out_mma.zero();
 
-    Q_sm.load_transpose(Q_, tile_y, N);
+    Q_sm.load_transpose(Q_, tile_y, q_seq_len);
 
-    for (int tile_x = 0; tile_x < tile_w; tile_x++) {
-        if (causal && (QK_mma.M_tile * tile_x - MN_DIFF) >= (QK_mma.N_tile * (tile_y + 1)))
+    for (int tile_x = 0; tile_x < num_col_tiles; tile_x++) {
+        if (causal && (QK_mma.M_tile * tile_x - qk_seq_len_diff) >= (QK_mma.N_tile * (tile_y + 1)))
             continue;
 
-        K_sm.load_transpose(K_, tile_x, has_mask, mask[batch], M);
+        K_sm.load_transpose(K_, tile_x, has_mask, mask[batch], k_seq_len);
 
         __syncthreads();
 
@@ -523,13 +605,12 @@ __global__ void forward_kernel(
 
         QK_mma.pointwise(tile_y, tile_x, [&](float el, int global_row, int global_col) {
 
-            if (global_row >= N || global_col >= M)
+            if (global_row >= q_seq_len ||
+                global_col >= k_seq_len ||
+                causal && (global_row < (global_col - qk_seq_len_diff)))
                 return 0.f;
 
             bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
-
-            if (causal && (global_row < (global_col - MN_DIFF)))
-                return 0.f;
 
             return __expf((scale * el + bias) - scale); 
         });
@@ -538,7 +619,7 @@ __global__ void forward_kernel(
 
         __syncthreads();
 
-        V_sm.load(V_, tile_x, M);
+        V_sm.load(V_, tile_x, k_seq_len);
 
         __syncthreads();
 
@@ -549,10 +630,10 @@ __global__ void forward_kernel(
         __syncthreads();
     }
 
-    out_mma.store(O_, tile_y, N);
+    out_mma.store(O_, tile_y, q_seq_len);
 
     if (need_store_rowsum)
-        out_mma.store_rowsum(L_, tile_y, N);
+        out_mma.store_rowsum(L_, tile_y, q_seq_len);
 }
 
 // forwards c++ function
@@ -742,14 +823,11 @@ __global__ void backward_kernel(
     const bool causal,
     const bool has_mask,
     const bool has_attn_bias,
-    const bool attn_bias_requires_grad,
-    const int row_tile_size,
-    const int col_tile_size,
-    const int row_tiles,
-    const int col_tiles
+    const bool attn_bias_requires_grad
 ) {
 
-    const int batch = q.size(0);
+    // dimensions
+
     const int head = q.size(1);
 
     const int batch_idx = blockIdx.x / head;
@@ -757,30 +835,12 @@ __global__ void backward_kernel(
 
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
+    const int qk_seq_len_diff = k_seq_len - q_seq_len;
+
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
-    const int num_col_tiles = cdiv(k_seq_len, col_tile_size);
-    const int num_row_tiles = cdiv(q_seq_len, row_tile_size);
-
-    const int row_tiles_idx = blockIdx.y / col_tiles;
-    const int col_tiles_idx = blockIdx.y % col_tiles;
-
-    const int col_tile_idx = threadIdx.x;
-    const int row_tile_idx = threadIdx.y;
-
-    const int lane_id = threadIdx.x & 31;
-
-    const int thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
-    const int tpb = blockDim.x * blockDim.y;
-
-    const int k_total_el = k_dim * col_tile_size;
-    const int v_total_el = v_dim * col_tile_size;
-
-    const int sm_q_offset = row_tile_idx * k_dim;
-    const int sm_k_offset = col_tile_idx * k_dim;
-    const int sm_v_offset = col_tile_idx * v_dim;
-    const int sm_o_offset = row_tile_idx * v_dim;
+    // shortcut accessors
 
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
@@ -802,103 +862,162 @@ __global__ void backward_kernel(
     int col_tiles_offset, row_tiles_offset;
     int global_col, global_row;
     bool should_calculate_attn, should_calculate_row, should_calculate_col;
+    scalar_t bias;
+
+    // mma
+
+    mma_warp_tile<scalar_t, 4, 4> mma;
+    out_mma_warp_tile<scalar_t> out_mma;
+
+    // tiles
+
+    const int num_col_tiles = cdiv(k_seq_len, mma.M_tile);
+    const int num_row_tiles = cdiv(q_seq_len, mma.N_tile);
 
     // shared memory
 
     extern __shared__ char _shared_mem_backward[];
 
-    smem_fragment<scalar_t> sm_q {_shared_mem_backward, row_tile_size, k_dim};
-    smem_fragment<scalar_t> sm_k {sm_q.next(), col_tile_size, k_dim};
-    smem_fragment<scalar_t> sm_v {sm_k.next(), col_tile_size, v_dim};
-    smem_fragment<scalar_t> sm_delta {sm_v.next(), row_tile_size, 1};
-    smem_fragment<scalar_t> sm_do {sm_delta.next(), row_tile_size, v_dim};
+    smem_fragment<scalar_t> sm_q {_shared_mem_backward, mma.N_tile, k_dim};
+    smem_fragment<scalar_t> sm_attn {_shared_mem_backward, mma.N_tile, mma.M_tile};
+    smem_fragment<scalar_t> sm_k {sm_q.next(), mma.M_tile, k_dim};
+    smem_fragment<scalar_t> sm_v {sm_k.next(), mma.M_tile, v_dim};
+    smem_fragment<scalar_t> sm_delta {sm_v.next(), mma.N_tile, 1};
+    smem_fragment<scalar_t> sm_do {sm_delta.next(), mma.N_tile, v_dim};
 
-    // loop
+    // loop over columns
 
-    for (int i = 0; i < num_col_tiles; i++) {
-        col_tiles_offset = i * col_tile_size;
-        global_col = col_tiles_offset + col_tiles_idx * col_tile_size + col_tile_idx;
-        should_calculate_col = global_col < k_seq_len && (!has_mask || mask_[global_col]);
+    for (int tile_y = 0; tile_y < num_col_tiles; tile_y++) {
 
-        sm_k.load(k_, i, k_seq_len);
+        // load keys and values into shared memory
 
-        sm_v.load(v_, i, k_seq_len);
+        sm_k.load_transpose(k_, tile_y, has_mask, mask_, k_seq_len);
 
-        for (int j = 0; j < num_row_tiles; j++) {
-            row_tiles_offset = j * row_tile_size;
-            global_row = row_tiles_offset + row_tiles_idx * row_tile_size + row_tile_idx;
-            should_calculate_row = global_row < q_seq_len;
+        sm_v.load_transpose(v_, tile_y, k_seq_len);
 
-            should_calculate_attn = should_calculate_row &&
-                                    should_calculate_col &&
-                                    ( !causal ||
-                                      (causal && (global_row >= (global_col - k_seq_len + q_seq_len))));
+        // loop over rows
 
-            sm_q.load(q_, j, q_seq_len);
+        for (int tile_x = 0; tile_x < num_row_tiles; tile_x++) {
 
-            sm_do.load(do_, j, q_seq_len);
+            if (causal && (mma.M_tile * tile_x - qk_seq_len_diff) >= (mma.N_tile * (tile_y + 1)))
+                continue;
 
-            sm_delta.load(delta_, j, q_seq_len);
+            // load queries and scaled do into shared memories
+
+            sm_q.load_transpose(q_, tile_x, q_seq_len);
+
+            sm_do.load(do_, tile_x, q_seq_len);
+
+            // load precomputed D = rowsum(do_scaled * o)
+
+            sm_delta.load(delta_, tile_x, q_seq_len);
 
             __syncthreads();
 
-            float attn = 0;
-            float dp = 0;
+            // accumulate qk similarities
 
-            if (should_calculate_attn) {
-                for (int d = 0; d < k_dim; d++) {
-                    // dmod is a "hacky" way to avoid bank register conflicts from @ahennequ
-                    int dmod = (d + lane_id) % k_dim;
-                    attn += sm_q.smem[sm_q_offset + dmod] * sm_k.smem[sm_k_offset + dmod];
-                }
+            mma.zero();
 
-                attn *= scale;
+            for (int d = 0; d < k_dim; d++) {
+                mma.mma(sm_q.smem, sm_k.smem, d, has_mask);
+            }
 
-                if (has_attn_bias) {
-                    attn += attn_bias_[global_row][global_col];
-                }
+            // calculate attention
 
-                attn -= scale;
-                attn = __expf(attn);
+            mma.pointwise(tile_y, tile_x, [&](float el, int global_row, int global_col) {
 
-                for (int d = 0; d < v_dim; d++) {
-                    // accumulate dv to global mem
+                if (global_row >= q_seq_len ||
+                    global_col >= k_seq_len ||
+                    causal && (global_row < (global_col - qk_seq_len_diff)))
+                    return 0.f;
 
-                    atomicAdd((scalar_t*) &dv_[global_col][d], sm_do.smem[sm_o_offset + d] * attn);
+                bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
 
-                    // calculate dp
+                return __expf((scale * el + bias) - scale);
 
-                    dp += sm_do.smem[sm_o_offset + d] * sm_v.smem[sm_v_offset + d];
-                }
+            });
+
+            mma.store(sm_attn.smem);
+
+            __syncthreads();
+
+            mma.zero();
+
+            // accumulate dv to global mem
+
+            for (int d = 0; d < v_dim; d++) {
+                mma.mma(sm_attn.smem, sm_do.smem, d, false);
+            }
+
+            __syncthreads();
+
+            // atomic add to dv for now
+
+            mma.atomic_add(dv_, 0, tile_y, v_dim, k_seq_len);
+
+            // calculate dp
+
+            mma.zero();
+
+            for (int d = 0; d < v_dim; d++) {
+                mma.mma_transpose_a(sm_do.smem, sm_v.smem, d, false);
             }
 
             // calculate dS
+            // just do things manually out in the open, as the operation is not very reusable
 
-            float dS = 0;
+            #pragma unroll
+            for (int i = 0; i < mma.N_thread; i++) {
+                int global_row = tile_y * mma.N_tile + i * mma.N_warp + mma.thread_y;
 
-            if (should_calculate_attn) {
-                float D = sm_delta.smem[row_tile_idx];
+                scalar_t row_val = sm_delta.smem[tile_y * mma.N_tile + i * mma.N_warp + mma.thread_y];
 
-                dS = attn * (dp - D);
+                #pragma unroll
+                for (int j = 0; j < mma.M_thread ; j++) {
+                    int global_col = tile_x * mma.M_tile + j * mma.M_warp + mma.thread_x;
 
-                if (has_attn_bias && attn_bias_requires_grad) {
-                    atomicAdd((scalar_t*) &ds_[global_row][global_col], dS);
+                    if (global_row >= q_seq_len ||
+                        global_col >= k_seq_len ||
+                        causal && (global_row < (global_col - qk_seq_len_diff)))
+                        continue;
+
+                    mma.C_frag[i * mma.M_thread + j] -= row_val;
+                    mma.C_frag[i * mma.M_thread + j] *= sm_attn.smem[(mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x];
                 }
             }
+
+            // store to ds_ if attention bias requires gradients
+
+            if (attn_bias_requires_grad)
+                mma.atomic_add(ds_, tile_x, tile_y, q_seq_len, k_seq_len);
+
+            // scale
+
+            mma.pointwise([&](scalar_t el) {
+                return el * scale;
+            });
+
+            mma.store(sm_attn.smem);
 
             __syncthreads();
 
-            // accumulate dq and dk to global mem
+            // calculate dk
 
-            if (should_calculate_attn) {
-                dS *= scale;
+            mma.zero();
 
-                for (int d = 0; d < k_dim; d++) {
-                    atomicAdd((scalar_t*) &dq_[global_row][d], dS * sm_k.smem[sm_k_offset + d]);
-
-                    atomicAdd((scalar_t*) &dk_[global_col][d], dS * sm_q.smem[sm_q_offset + d]);
-                }
+            for (int d = 0; d < k_dim; d++) {
+                mma.mma(sm_attn.smem, sm_k.smem, d, false);
             }
+
+            mma.atomic_add(dk_, 0, tile_y, k_dim, k_seq_len);
+
+            // calculate dq
+
+            for (int d = 0; d < k_dim; d++) {
+                mma.mma_transpose_a(sm_attn.smem, sm_q.smem, d, false);
+            }
+
+            mma.atomic_add(dq_, 0, tile_x, k_dim, q_seq_len);
 
             __syncthreads();
         }
@@ -918,11 +1037,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor attn_bias,
     float scale,
     bool causal,
-    bool attn_bias_requires_grad,
-    int row_tile_size,
-    int col_tile_size,
-    int row_tiles,
-    int col_tiles
+    bool attn_bias_requires_grad
 ) {
     auto query_device = device_of(q);
 
@@ -958,17 +1073,22 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     // setup backwards call
 
-    const dim3 backwards_threads_per_block(col_tile_size, row_tile_size);
-    const dim3 backwards_blocks(batch * heads, row_tiles * col_tiles);
+    const dim3 backwards_threads_per_block(256);
+    const dim3 backwards_blocks(batch * heads);
 
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
 
+        using mma_warp_tile_klass = mma_warp_tile<scalar_t, 4, 4>;
+
+        const int N_tile = mma_warp_tile_klass::N_tile;
+        const int M_tile = mma_warp_tile_klass::M_tile;
+
         const unsigned backwards_preprocess_shared_mem_size = (cdiv(v_dim, 32) + v_dim + 1) * sizeof(scalar_t);
 
-        const unsigned backwards_shared_mem_size = (  (row_tile_size + col_tile_size) * k_dim +      // q, k
-                                                      (row_tile_size + col_tile_size) * v_dim +      // v, do
-                                                      row_tile_size                                  // delta
+        const unsigned backwards_shared_mem_size = (  (N_tile + M_tile) * k_dim +      // q, k
+                                                      (N_tile + M_tile) * v_dim +      // v, do
+                                                      N_tile                           // delta
                                                     ) * sizeof(scalar_t);
 
         backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
@@ -995,11 +1115,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             causal,
             has_mask,
             has_attn_bias,
-            attn_bias_requires_grad,
-            row_tile_size,
-            col_tile_size,
-            row_tiles,
-            col_tiles
+            attn_bias_requires_grad
         );
     }));
 

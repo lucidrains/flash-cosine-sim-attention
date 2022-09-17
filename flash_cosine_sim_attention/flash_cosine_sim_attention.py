@@ -80,16 +80,9 @@ class FlashCosineSimAttention(Function):
         mask,
         attn_bias,
         scale,
-        causal,
-        backward_row_tile_size,
-        backward_col_tile_size,
-        backward_row_tiles,
-        backward_col_tiles
+        causal
     ):
-        assert backward_col_tiles == 1
         assert v.shape[-1] == 64, 'value dimension is fixed at 64 for now'
-
-        assert backward_row_tile_size == backward_col_tile_size
 
         batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
 
@@ -117,11 +110,7 @@ class FlashCosineSimAttention(Function):
 
         ctx.params = (
             scale,
-            causal,
-            backward_row_tile_size,
-            backward_col_tile_size,
-            backward_row_tiles,
-            backward_col_tiles
+            causal
         )
 
         return o
@@ -136,11 +125,7 @@ class FlashCosineSimAttention(Function):
 
         (
             scale,
-            causal,
-            backward_row_tile_size,
-            backward_col_tile_size,
-            backward_row_tiles,
-            backward_col_tiles
+            causal
         ) = ctx.params
 
         dq, dk, dv, db = backward(
@@ -150,11 +135,7 @@ class FlashCosineSimAttention(Function):
             attn_bias,
             scale,
             causal,
-            attn_bias.requires_grad,
-            backward_row_tile_size,
-            backward_col_tile_size,
-            backward_row_tiles,
-            backward_col_tiles
+            attn_bias.requires_grad
         )
 
         db = db if attn_bias.requires_grad else None
@@ -188,11 +169,7 @@ def flash_cosine_sim_attention(
         mask,
         attn_bias,
         scale,
-        causal,
-        backward_row_tile_size,
-        backward_col_tile_size,
-        backward_row_tiles,
-        backward_col_tiles
+        causal
     )
 
     return o
