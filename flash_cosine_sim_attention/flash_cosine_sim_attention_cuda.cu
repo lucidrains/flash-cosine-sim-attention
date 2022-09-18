@@ -161,43 +161,6 @@ struct mma_warp_tile {
         }
     }
 
-    // Performs C = transpose(A) * B + C
-
-    __device__ void mma_transpose_a(
-        const scalar_t* A_sm_ptr,
-        const scalar_t* B_sm_ptr,
-        int k,
-        bool has_mask
-    ) {
-        // Load a N x 1 fragment of transpose(A) from shared memory to registers:
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            A_frag[i] = A_sm_ptr[(i * N_warp + thread_y) * M_tile + k];
-        }
-
-        // Load a 1 x M fragment of B from shared memory to registers:
-        #pragma unroll
-        for (int i = 0; i < M_thread; i++) {
-            B_frag[i] = B_sm_ptr[i * M_warp + thread_x + k * M_tile];
-        }
-
-        // Compute:
-        #pragma unroll
-        for (int j = 0; j < M_thread ; j++) {
-
-            bool is_masked_out = has_mask && (B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE);
-
-            #pragma unroll
-            for (int i = 0; i < N_thread; i++) {
-                if (is_masked_out) {
-                    C_frag[i * M_thread + j] = MASK_VALUE;
-                } else {
-                    C_frag[i * M_thread + j] += A_frag[i] * B_frag[j];
-                }
-            }
-        }
-    }
-
     // Perform a pointwise operation, specified by the given lambda, on C
 
     template<typename F>
@@ -875,8 +838,8 @@ __global__ void backward_kernel(
     extern __shared__ char _shared_mem_backward[];
 
     smem_fragment<scalar_t> sm_q {_shared_mem_backward, mma.N_tile, k_dim};
-    smem_fragment<scalar_t> sm_attn {_shared_mem_backward, mma.N_tile, mma.M_tile};
-    smem_fragment<scalar_t> sm_k {(k_dim > mma.M_tile ? sm_q.next() : sm_attn.next()), mma.M_tile, k_dim};
+    smem_fragment<scalar_t> sm_attn {sm_q.next(), mma.N_tile, mma.M_tile};
+    smem_fragment<scalar_t> sm_k {sm_attn.next(), mma.M_tile, k_dim};
     smem_fragment<scalar_t> sm_v {sm_k.next(), mma.M_tile, v_dim};
     smem_fragment<scalar_t> sm_do {sm_v.next(), mma.N_tile, v_dim};
 
@@ -952,12 +915,18 @@ __global__ void backward_kernel(
 
             dv_mma.atomic_add(dv_, 0, col_offset, v_dim, k_seq_len);
 
+            // transpose sm_do
+
+            sm_do.load_transpose(do_, tile_y, q_seq_len);
+
+            __syncthreads();
+
             // calculate dp
 
             mma.zero();
 
             for (int d = 0; d < v_dim; d++) {
-                mma.mma_transpose_a(sm_do.smem, sm_v.smem, d, false);
+                mma.mma(sm_do.smem, sm_v.smem, d, false);
             }
 
             __syncthreads();
@@ -973,13 +942,6 @@ __global__ void backward_kernel(
 
                 #pragma unroll
                 for (int j = 0; j < mma.M_thread ; j++) {
-                    int global_col = col_offset + j * mma.M_warp + mma.thread_x;
-
-                    if (global_row >= q_seq_len ||
-                        global_col >= k_seq_len ||
-                        causal && (global_row < (global_col - qk_seq_len_diff)))
-                        continue;
-
                     mma.C_frag[i * mma.M_thread + j] -= row_val;
                     mma.C_frag[i * mma.M_thread + j] *= sm_attn.smem[(mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x];
                 }
@@ -1012,8 +974,10 @@ __global__ void backward_kernel(
 
             // calculate dq
 
+            mma.zero();
+
             for (int d = 0; d < mma.M_tile; d++) {
-                mma.mma_transpose_a(sm_attn.smem, sm_q.smem, d, false);
+                mma.mma(sm_attn.smem, sm_q.smem, d, false);
             }
 
             mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
@@ -1087,6 +1051,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
         const unsigned backwards_shared_mem_size = (  (N_tile + M_tile) * k_dim +      // q, k
                                                       (N_tile + M_tile) * v_dim +      // v, do
+                                                      (N_tile * M_tile) +              // attn
                                                       N_tile                           // delta
                                                     ) * sizeof(scalar_t);
 
