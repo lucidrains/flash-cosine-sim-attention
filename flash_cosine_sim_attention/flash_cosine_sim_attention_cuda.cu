@@ -745,6 +745,8 @@ template <typename scalar_t>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
+    const PackedAccessor<scalar_t, 3> l,
+          PackedAccessor<scalar_t, 4> d_out_scaled,
           PackedAccessor<scalar_t, 4> delta
 ) {
     const int heads = o.size(1);
@@ -766,17 +768,32 @@ __global__ void backward_preprocess(
 
     scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
     scalar_t* sm_do     = reinterpret_cast<scalar_t*>(&sm_delta[cdiv(v_dim, 32)]);
+    scalar_t* sm_rowsum = reinterpret_cast<scalar_t*>(&sm_do[v_dim]);
 
     auto do_ = d_out[batch_idx][head_idx][seq_idx];
     auto o_ = o[batch_idx][head_idx][seq_idx];
+    auto l_ = l[batch_idx][head_idx];
+    auto do_scaled_ = d_out_scaled[batch_idx][head_idx][seq_idx];
     auto delta_ = delta[batch_idx][head_idx][seq_idx];
+
+    // load rowsum into shared memory
+
+    if (dim_idx == 0)
+        sm_rowsum[0] = l_[seq_idx];
+
+    __syncthreads();
 
     // load do into shared memory
 
     if (dim_idx < v_dim)
-        sm_do[dim_idx] = do_[dim_idx];
+        sm_do[dim_idx] = do_[dim_idx] / max(sm_rowsum[0], 1e-10);
 
     __syncthreads();
+
+    // store do_scaled to gmem
+
+    if (dim_idx < v_dim)
+        do_scaled_[dim_idx] = sm_do[dim_idx];
 
     // load do_scaled * o into registers
 
@@ -811,6 +828,7 @@ __global__ void backward_preprocess(
         if (dim_idx == 0) {
             delta_[0] = val;
         }
+
     }
 }
 
@@ -820,8 +838,7 @@ template <typename scalar_t>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
-    const PackedAccessor<scalar_t, 4> v,
-    const PackedAccessor<scalar_t, 3> l,
+    const PackedAccessor<scalar_t, 4> v,    
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<scalar_t, 4> dq,
@@ -856,7 +873,6 @@ __global__ void backward_kernel(
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
     auto v_ = v[batch_idx][head_idx];
-    auto l_ = l[batch_idx][head_idx];
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
@@ -923,9 +939,6 @@ __global__ void backward_kernel(
             // load queries and scaled do into shared memories
 
             sm_q.load_transpose(q_, tile_y, q_seq_len);
-
-            __syncthreads();
-
             sm_do.load(do_, tile_y, q_seq_len);
 
             __syncthreads();
@@ -952,22 +965,6 @@ __global__ void backward_kernel(
                 return expf((scale * el + bias) - scale);
 
             });
-
-            // manually do loop to divide by rowsums
-
-            #pragma unroll
-            for (int i = 0; i < mma.N_thread; i++) {
-                int global_row = row_offset + i * mma.N_warp + mma.thread_y;
-
-                scalar_t row_val = l_[global_row];
-
-                #pragma unroll
-                for (int j = 0; j < mma.M_thread ; j++) {
-                    mma.C_frag[i * mma.M_thread + j] /= max(row_val, 1e-20);
-                }
-            }
-
-            __syncthreads();
 
             mma.store(sm_attn.smem);
 
@@ -1021,8 +1018,6 @@ __global__ void backward_kernel(
             mma.pointwise([&](scalar_t el) {
                 return el * scale;
             });
-
-            __syncthreads();
 
             mma.store(sm_attn.smem);
 
@@ -1099,6 +1094,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     // setup dq, dk, dv
 
+    auto d_out_scaled = at::empty_like(d_out, options);
     auto delta = at::empty({batch, heads, seq, 1}, options);
 
     auto dq = at::zeros_like(q, options);
@@ -1137,6 +1133,8 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
         backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
             ACCESSOR(d_out, 4, scalar_t),
             ACCESSOR(o, 4, scalar_t),
+            ACCESSOR(l, 3, scalar_t),
+            ACCESSOR(d_out_scaled, 4, scalar_t),
             ACCESSOR(delta, 4, scalar_t)
         );
 
@@ -1144,14 +1142,13 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(q, 4, scalar_t),
             ACCESSOR(k, 4, scalar_t),
             ACCESSOR(v, 4, scalar_t),
-            ACCESSOR(l, 3, scalar_t),
             ACCESSOR(mask, 2, bool),
             ACCESSOR(attn_bias, 3, scalar_t),
             ACCESSOR(dq, 4, scalar_t),
             ACCESSOR(dk, 4, scalar_t),
             ACCESSOR(dv, 4, scalar_t),
             ACCESSOR(db, 3, scalar_t),
-            ACCESSOR(d_out, 4, scalar_t),
+            ACCESSOR(d_out_scaled, 4, scalar_t),
             ACCESSOR(delta, 4, scalar_t),
             scale,
             causal,
