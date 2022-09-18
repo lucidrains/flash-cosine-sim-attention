@@ -360,6 +360,17 @@ struct mma_warp_tile {
         }
     }
 
+    __device__ void add_to(scalar_t* C_sm_ptr) {
+        #pragma unroll
+        for (int i = 0; i < N_thread; i++) {
+            #pragma unroll
+            for (int j = 0; j < M_thread ; j++) {
+                C_sm_ptr[(thread_y + i * N_warp) * M_tile + j * M_warp + thread_x]
+                    += C_frag[i * M_thread + j];
+            }
+        }
+    }
+
     __device__ void store_transpose(scalar_t* C_sm_ptr) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
@@ -1042,13 +1053,21 @@ __global__ void backward_kernel(
 
             // calculate dq
 
+            sm_q.load(dq_, tile_y, q_seq_len);
+
+            __syncthreads();
+
             dq_mma.zero();
 
             for (int d = 0; d < mma.M_tile; d++) {
                 dq_mma.mma_transpose_a(sm_attn, sm_k, d);
             }
 
-            dq_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
+            dq_mma.add_to(sm_q.smem);
+
+            __syncthreads();
+
+            sm_q.store(dq_, tile_y, q_seq_len);
 
             __syncthreads();
 
