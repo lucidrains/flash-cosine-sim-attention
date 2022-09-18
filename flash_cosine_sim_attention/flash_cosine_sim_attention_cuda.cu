@@ -472,15 +472,6 @@ struct out_mma_warp_tile {
         }
     }
 
-    // Perform a pointwise operation, specified by the given lambda, on C
-    template<typename F>
-    __device__ void pointwise(F&& op) {
-        #pragma unroll
-        for (int i = 0; i < N_thread * M_thread; i++) {
-            C_frag[i] = op(C_frag[i], i);
-        }
-    }
-
     // Copy C from registers to shared memory
     __device__ void store(scalar_t* C_sm_ptr) {
         #pragma unroll
@@ -994,7 +985,7 @@ __global__ void backward_kernel(
                 #pragma unroll
                 for (int j = 0; j < mma.M_thread ; j++) {
                     mma.C_frag[i * mma.M_thread + j] -= row_val;
-                    mma.C_frag[i * mma.M_thread + j] *= sm_attn.smem[(mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x];
+                    mma.C_frag[i * mma.M_thread + j] *= sm_attn.get((mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x);
                 }
             }
 
@@ -1008,6 +999,8 @@ __global__ void backward_kernel(
             mma.pointwise([&](scalar_t el) {
                 return el * scale;
             });
+
+            __syncthreads();
 
             mma.store(sm_attn.smem);
 
