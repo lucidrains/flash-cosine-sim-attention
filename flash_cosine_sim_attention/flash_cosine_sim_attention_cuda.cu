@@ -983,10 +983,14 @@ __global__ void backward_kernel(
 
             // calculate dp
 
+            sm_do.load_transpose(do_, tile_y, q_seq_len);
+
+            __syncthreads();
+
             mma.zero();
 
             for (int d = 0; d < v_dim; d++) {
-                mma.mma_transpose_a(sm_do, sm_v, d);
+                mma.mma(sm_do, sm_v, d);
             }
 
             __syncthreads();
