@@ -14,6 +14,7 @@ def cast_tuple(t):
 # argparse
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--causal', default = False, action = 'store_true')
 parser.add_argument('--only-forwards', default = False, action = 'store_true')
 parser.add_argument('--only-backwards', default = False, action = 'store_true')
 args = parser.parse_args()
@@ -25,6 +26,7 @@ assert not (args.only_forwards and args.only_backwards)
 BATCH_SIZES = (2, 4, 8)
 HEADS = 4
 DIM = 64
+CAUSAL = args.causal
 
 TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192)
 
@@ -64,10 +66,10 @@ for batch, heads, dim in permutations:
         k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
         v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
 
-        fused_time = fused_attention_fn(q, k, v)
+        fused_time = fused_attention_fn(q, k, v, causal = CAUSAL)
 
         try:
-            baseline_time = attention_fn(q, k, v)
+            baseline_time = attention_fn(q, k, v, causal = CAUSAL)
         except:
             torch.cuda.empty_cache()
             baseline_time = -1
