@@ -72,6 +72,107 @@ bool divisible_by(int num, int denom) {
 
 __constant__ float NULL_FLOAT_VALUE = -3.14159e5;
 
+// shared memory fragment
+
+template<typename T>
+struct smem_fragment {
+    T* smem;
+    int N;
+    int M;
+
+    __device__ smem_fragment(char* shared_base, int N, int M)
+      : smem(reinterpret_cast<T*>(shared_base)), N(N), M(M) { }
+
+    __device__ void load(const T* gmem) {
+        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+            smem[i] = gmem[i];
+        }
+    }
+
+    __device__ T get(int index) {
+        return smem[index];
+    }
+
+    __device__ T get_transpose(int index) {
+        int i = index % N;
+        int j = index / M;
+        return smem[i * M + j];
+    }
+
+    template<typename accessor>
+    __device__ void load(accessor gmem, int tile_y, int max_y) {
+        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+            int x = i % M;
+            int y = i / M;
+            int gmem_y = y + tile_y * N;
+
+            if (gmem_y >= max_y)
+                continue;
+
+            smem[i] = gmem[gmem_y][x];
+        }
+    }
+
+    template<typename accessor>
+    __device__ void load_transpose(accessor gmem, int tile_y, int max_y) {
+        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+            int y = i % M;
+            int x = i / M;
+            int gmem_y = x + tile_y * N;
+
+            if (gmem_y >= max_y)
+                continue;
+
+            smem[y * N + x] = gmem[gmem_y][y];
+        }
+    }
+
+    template<typename accessor, typename accessor_mask>
+    __device__ void load_transpose(accessor gmem, int tile_y, bool has_mask, accessor_mask mask, int max_y) {
+        if (!has_mask)
+            return load_transpose(gmem, tile_y, max_y);
+
+        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+            int y = i % M;
+            int x = i / M;
+            int gmem_y = x + tile_y * N;
+
+            if (y == 0 && !mask[gmem_y]) {
+                smem[y * N + x] = NULL_FLOAT_VALUE;
+                continue;
+            }
+
+            if (gmem_y >= max_y)
+                continue;
+
+            smem[y * N + x] = gmem[gmem_y][y];
+        }
+    }
+
+    template<typename accessor>
+    __device__ void store(accessor gmem, int tile_y, int max_y) {
+        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+            int x = i % M;
+            int y = i / M;
+            int gmem_y = y + tile_y * N;
+
+            if (gmem_y >= max_y) {
+                continue;
+            }
+
+            gmem[gmem_y][x] = smem[i];
+        }
+    }
+
+    __device__ unsigned size() {
+        return N * M;
+    }
+
+    __device__ char* next() {
+        return reinterpret_cast<char*>(smem + size());
+    }
+};
+
 // mma
 
 template<typename scalar_t, int tmpl_N_thread, int tmpl_M_thread>
@@ -126,29 +227,39 @@ struct mma_warp_tile {
 
     // Performs C = A * B + C
 
-    __device__ void mma(
-        const scalar_t* A_sm_ptr,
-        const scalar_t* B_sm_ptr,
+    __device__ void mma_full(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
         int k,
-        bool has_mask
+        bool has_mask,
+        bool transpose_a,
+        bool transpose_b
     ) {
         // Load a N x 1 fragment of A from shared memory to registers:
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
-            A_frag[i] = A_sm_ptr[i * N_warp + thread_y + k * N_tile];
+            int sm_idx = i * N_warp + thread_y + k * N_tile;
+            A_frag[i] = !transpose_a ? A_sm.get(sm_idx) : A_sm.get_transpose(sm_idx);
         }
 
         // Load a 1 x M fragment of B from shared memory to registers:
         #pragma unroll
         for (int i = 0; i < M_thread; i++) {
-            B_frag[i] = B_sm_ptr[i * M_warp + thread_x + k * M_tile];
+            int sm_idx = i * M_warp + thread_x + k * M_tile;
+            B_frag[i] = !transpose_b ? B_sm.get(sm_idx) : B_sm.get_transpose(sm_idx);
         }
 
         // Compute:
         #pragma unroll
         for (int j = 0; j < M_thread ; j++) {
 
-            bool is_masked_out = has_mask && (B_sm_ptr[j * M_warp + thread_x] == NULL_FLOAT_VALUE);
+            bool is_masked_out = false;
+
+            if (has_mask) {
+                int sm_idx = j * M_warp + thread_x;
+                scalar_t maybe_mask_val = !transpose_b ? B_sm.get(sm_idx) : B_sm.get_transpose(sm_idx);
+                is_masked_out = (maybe_mask_val == NULL_FLOAT_VALUE);
+            }
 
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
@@ -159,6 +270,42 @@ struct mma_warp_tile {
                 }
             }
         }
+    }
+
+    __device__ void mma(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k,
+        bool has_mask
+    ) {
+        return mma_full(A_sm, B_sm, k, has_mask, false, false);
+    }
+
+    __device__ void mma_transpose_a(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k,
+        bool has_mask
+    ) {
+        return mma_full(A_sm, B_sm, k, has_mask, true, false);
+    }
+
+    __device__ void mma_transpose_b(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k,
+        bool has_mask
+    ) {
+        return mma_full(A_sm, B_sm, k, has_mask, false, true);
+    }
+
+    __device__ void mma_transpose_ab(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k,
+        bool has_mask
+    ) {
+        return mma_full(A_sm, B_sm, k, has_mask, true, true);
     }
 
     // Perform a pointwise operation, specified by the given lambda, on C
@@ -297,20 +444,20 @@ struct out_mma_warp_tile {
 
     // Performs C = A * B + C
     __device__ void mma(
-        const scalar_t* A_sm_ptr,
-        const scalar_t* B_sm_ptr,
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
         int k
     ) {
         // Load a N x 1 fragment of A from shared memory to registers:
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
-            A_frag[i] = A_sm_ptr[i * N_warp + thread_y + k * N_tile];
+            A_frag[i] = A_sm.get(i * N_warp + thread_y + k * N_tile);
         }
 
         // Load a 1 x M fragment of B from shared memory to registers:
         #pragma unroll
         for (int i = 0; i < M_thread; i++) {
-            B_frag[i] = B_sm_ptr[i * M_warp + thread_x + k * M_tile];
+            B_frag[i] = B_sm.get(i * M_warp + thread_x + k * M_tile);
         }
 
         // Compute:
@@ -393,96 +540,6 @@ struct out_mma_warp_tile {
         }
     }
 };
-// shared memory fragment
-
-template<typename T>
-struct smem_fragment {
-    T* smem;
-    int N;
-    int M;
-
-    __device__ smem_fragment(char* shared_base, int N, int M)
-      : smem(reinterpret_cast<T*>(shared_base)), N(N), M(M) { }
-
-    __device__ void load(const T* gmem) {
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            smem[i] = gmem[i];
-        }
-    }
-
-    template<typename accessor>
-    __device__ void load(accessor gmem, int tile_y, int max_y) {
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int x = i % M;
-            int y = i / M;
-            int gmem_y = y + tile_y * N;
-
-            if (gmem_y >= max_y)
-                continue;
-
-            smem[i] = gmem[gmem_y][x];
-        }
-    }
-
-    template<typename accessor>
-    __device__ void load_transpose(accessor gmem, int tile_y, int max_y) {
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int y = i % M;
-            int x = i / M;
-            int gmem_y = x + tile_y * N;
-
-            if (gmem_y >= max_y)
-                continue;
-
-            smem[y * N + x] = gmem[gmem_y][y];
-        }
-    }
-
-    template<typename accessor, typename accessor_mask>
-    __device__ void load_transpose(accessor gmem, int tile_y, bool has_mask, accessor_mask mask, int max_y) {
-        if (!has_mask)
-            return load_transpose(gmem, tile_y, max_y);
-
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int y = i % M;
-            int x = i / M;
-            int gmem_y = x + tile_y * N;
-
-            if (y == 0 && !mask[gmem_y]) {
-                smem[y * N + x] = NULL_FLOAT_VALUE;
-                continue;
-            }
-
-            if (gmem_y >= max_y)
-                continue;
-
-            smem[y * N + x] = gmem[gmem_y][y];
-        }
-    }
-
-    template<typename accessor>
-    __device__ void store(accessor gmem, int tile_y, int max_y) {
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int x = i % M;
-            int y = i / M;
-            int gmem_y = y + tile_y * N;
-
-            if (gmem_y >= max_y) {
-                continue;
-            }
-
-            gmem[gmem_y][x] = smem[i];
-        }
-    }
-
-    __device__ unsigned size() {
-        return N * M;
-    }
-
-    __device__ char* next() {
-        return reinterpret_cast<char*>(smem + size());
-    }
-};
 
 // forward kernel
 
@@ -562,7 +619,7 @@ __global__ void forward_kernel(
         QK_mma.zero();
 
         for (int d = 0; d < D; d++) {
-            QK_mma.mma(Q_sm.smem, K_sm.smem, d, has_mask);
+            QK_mma.mma(Q_sm, K_sm, d, has_mask);
         }
 
         QK_mma.pointwise(tile_y, tile_x, [&](scalar_t el, int global_row, int global_col) {
@@ -586,7 +643,7 @@ __global__ void forward_kernel(
         __syncthreads();
 
         for (int d = 0; d < QK_mma.M_tile; d++) {
-            out_mma.mma(A_sm.smem, V_sm.smem, d);
+            out_mma.mma(A_sm, V_sm, d);
         }
 
         __syncthreads();
@@ -877,7 +934,7 @@ __global__ void backward_kernel(
             mma.zero();
 
             for (int d = 0; d < k_dim; d++) {
-                mma.mma(sm_q.smem, sm_k.smem, d, has_mask);
+                mma.mma(sm_q, sm_k, d, has_mask);
             }
 
             // calculate attention
@@ -906,7 +963,7 @@ __global__ void backward_kernel(
             // accumulate dv to global mem
 
             for (int d = 0; d < mma.N_tile; d++) {
-                dv_mma.mma(sm_attn.smem, sm_do.smem, d, false);
+                dv_mma.mma(sm_attn, sm_do, d, false);
             }
 
             __syncthreads();
@@ -915,18 +972,12 @@ __global__ void backward_kernel(
 
             dv_mma.atomic_add(dv_, 0, col_offset, v_dim, k_seq_len);
 
-            // transpose sm_do
-
-            sm_do.load_transpose(do_, tile_y, q_seq_len);
-
-            __syncthreads();
-
             // calculate dp
 
             mma.zero();
 
             for (int d = 0; d < v_dim; d++) {
-                mma.mma(sm_do.smem, sm_v.smem, d, false);
+                mma.mma_transpose_a(sm_do, sm_v, d, false);
             }
 
             __syncthreads();
@@ -964,23 +1015,23 @@ __global__ void backward_kernel(
 
             // calculate dk
 
-            mma.zero();
+            dv_mma.zero();
 
             for (int d = 0; d < mma.N_tile; d++) {
-                mma.mma(sm_attn.smem, sm_k.smem, d, false);
+                dv_mma.mma_transpose_b(sm_attn, sm_k, d, false);
             }
 
-            mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
+            dv_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
 
             // calculate dq
 
-            mma.zero();
+            dv_mma.zero();
 
             for (int d = 0; d < mma.M_tile; d++) {
-                mma.mma(sm_attn.smem, sm_q.smem, d, false);
+                dv_mma.mma_transpose_ab(sm_attn, sm_q, d, false);
             }
 
-            mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
+            dv_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
 
             __syncthreads();
         }
