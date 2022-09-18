@@ -21,27 +21,6 @@ void check(const char* file, const int line)
 
 #define ACCESSOR(x, n, type) x.packed_accessor32<type, n, torch::RestrictPtrTraits>()
 
-#ifdef __CUDA_ARCH__
-#if __CUDA_ARCH__ < 800
-__device__ __forceinline__ void atomicAdd(c10::Half* address, c10::Half val) {
-    unsigned int *address_as_ui = reinterpret_cast<unsigned int *>(reinterpret_cast<char *>(address) - (reinterpret_cast<size_t>(address) & 2));
-    unsigned int old = *address_as_ui;
-    unsigned int assumed;
-
-    do {
-        assumed = old;
-        unsigned short hsum = reinterpret_cast<size_t>(address) & 2 ? (old >> 16) : (old & 0xffff);
-        hsum += val;
-        old = reinterpret_cast<size_t>(address) & 2
-                 ? (old & 0xffff) | (hsum << 16)
-                 : (old & 0xffff0000) | hsum;
-        old = atomicCAS(address_as_ui, assumed, old);
-
-    } while (assumed != old);
-}
-#endif
-#endif
-
 // type alias
 
 template <typename scalar_t, int dims>
@@ -418,7 +397,7 @@ struct mma_warp_tile {
                 if (gmem_y >= max_y || gmem_x >= max_x)
                     continue;
 
-                atomicAdd((scalar_t*) &gmem[gmem_y][gmem_x], C_frag[i * M_thread + j]);
+                atomicAdd((float*) &gmem[gmem_y][gmem_x], C_frag[i * M_thread + j]);
             }
         }
     }
