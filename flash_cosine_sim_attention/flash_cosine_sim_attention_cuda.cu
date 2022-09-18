@@ -281,31 +281,36 @@ struct mma_warp_tile {
         return mma_full(A_sm, B_sm, k, has_mask, false, false);
     }
 
+    __device__ void mma(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k
+    ) {
+        return mma_full(A_sm, B_sm, k, false, false, false);
+    }
+
     __device__ void mma_transpose_a(
         smem_fragment<scalar_t> A_sm,
         smem_fragment<scalar_t> B_sm,
-        int k,
-        bool has_mask
+        int k
     ) {
-        return mma_full(A_sm, B_sm, k, has_mask, true, false);
+        return mma_full(A_sm, B_sm, k, false, true, false);
     }
 
     __device__ void mma_transpose_b(
         smem_fragment<scalar_t> A_sm,
         smem_fragment<scalar_t> B_sm,
-        int k,
-        bool has_mask
+        int k
     ) {
-        return mma_full(A_sm, B_sm, k, has_mask, false, true);
+        return mma_full(A_sm, B_sm, k, false, false, true);
     }
 
     __device__ void mma_transpose_ab(
         smem_fragment<scalar_t> A_sm,
         smem_fragment<scalar_t> B_sm,
-        int k,
-        bool has_mask
+        int k
     ) {
-        return mma_full(A_sm, B_sm, k, has_mask, true, true);
+        return mma_full(A_sm, B_sm, k, false, true, true);
     }
 
     // Perform a pointwise operation, specified by the given lambda, on C
@@ -954,7 +959,7 @@ __global__ void backward_kernel(
             // accumulate dv to global mem
 
             for (int d = 0; d < mma.N_tile; d++) {
-                dv_mma.mma(sm_attn, sm_do, d, false);
+                dv_mma.mma(sm_attn, sm_do, d);
             }
 
             __syncthreads();
@@ -968,7 +973,7 @@ __global__ void backward_kernel(
             mma.zero();
 
             for (int d = 0; d < v_dim; d++) {
-                mma.mma_transpose_a(sm_do, sm_v, d, false);
+                mma.mma_transpose_a(sm_do, sm_v, d);
             }
 
             __syncthreads();
@@ -1006,25 +1011,25 @@ __global__ void backward_kernel(
 
             __syncthreads();
 
-            // calculate dk
-
-            dv_mma.zero();
-
-            for (int d = 0; d < mma.N_tile; d++) {
-                dv_mma.mma_transpose_b(sm_attn, sm_k, d, false);
-            }
-
-            dv_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
-
             // calculate dq
 
             dv_mma.zero();
 
             for (int d = 0; d < mma.M_tile; d++) {
-                dv_mma.mma_transpose_ab(sm_attn, sm_q, d, false);
+                dv_mma.mma_transpose_ab(sm_attn, sm_k, d);
             }
 
             dv_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
+
+            // calculate dk
+
+            dv_mma.zero();
+
+            for (int d = 0; d < mma.N_tile; d++) {
+                dv_mma.mma_transpose_b(sm_attn, sm_q, d);
+            }
+
+            dv_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
 
             __syncthreads();
         }
