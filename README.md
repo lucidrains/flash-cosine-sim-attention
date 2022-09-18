@@ -10,6 +10,7 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 ## Todo
 
+- [ ] fix transposing in shared memory using registers or in-place
 - [ ] make sure works with f16
 - [ ] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 - [ ] make sure value dimensions can be 16, 32, 64, or 128 using the templating strategy recommended by Arthur

@@ -880,6 +880,7 @@ __global__ void backward_kernel(
 
     mma_warp_tile<scalar_t, 2, 2> mma;
     mma_warp_tile<scalar_t, 2, 4> dv_mma;
+    mma_warp_tile<scalar_t, 2, 4> qk_tmp_mma;
 
     // tiles
 
@@ -1008,6 +1009,24 @@ __global__ void backward_kernel(
             __syncthreads();
 
             mma.store(sm_attn.smem);
+            sm_q.load(q_, tile_y, q_seq_len);
+
+            __syncthreads();
+
+            // calculate dk
+
+            dv_mma.zero();
+
+            for (int d = 0; d < mma.N_tile; d++) {
+                dv_mma.mma(sm_attn, sm_q, d);
+            }
+
+            dv_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
+
+            __syncthreads();
+
+            mma.store_transpose(sm_attn.smem);
+            sm_k.load(k_, tile_x, k_seq_len);
 
             __syncthreads();
 
@@ -1016,20 +1035,14 @@ __global__ void backward_kernel(
             dv_mma.zero();
 
             for (int d = 0; d < mma.M_tile; d++) {
-                dv_mma.mma_transpose_ab(sm_attn, sm_k, d);
+                dv_mma.mma(sm_attn, sm_k, d);
             }
 
             dv_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
 
-            // calculate dk
+            __syncthreads();
 
-            dv_mma.zero();
-
-            for (int d = 0; d < mma.N_tile; d++) {
-                dv_mma.mma_transpose_b(sm_attn, sm_q, d);
-            }
-
-            dv_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
+            sm_k.load_transpose(k_, tile_x, has_mask, mask_, k_seq_len);
 
             __syncthreads();
         }
