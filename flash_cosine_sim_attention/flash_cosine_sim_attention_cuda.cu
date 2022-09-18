@@ -250,7 +250,7 @@ struct mma_warp_tile {
         // Load a N x 1 fragment of A from shared memory to registers:
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
-            int sm_idx = i * N_warp + thread_y + k * N_tile;
+            int sm_idx = i * N_warp + thread_y + k * A_sm.get_row();
             A_frag[i] = !transpose_a ? A_sm.get(sm_idx) : A_sm.get_transpose(sm_idx);
         }
 
@@ -992,14 +992,10 @@ __global__ void backward_kernel(
 
             // calculate dp
 
-            sm_do.load_transpose(do_, tile_y, q_seq_len);
-
-            __syncthreads();
-
             mma.zero();
 
             for (int d = 0; d < v_dim; d++) {
-                mma.mma(sm_do, sm_v, d);
+                mma.mma_transpose_a(sm_do, sm_v, d);
             }
 
             __syncthreads();
