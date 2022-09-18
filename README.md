@@ -10,8 +10,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 ## Todo
 
-- [ ] have shared memory keep track of transposed states and take care of that automatically during mma and transpose flags
 - [ ] make sure works with f16
+- [ ] fix mma with transpose a or b matrices
 - [ ] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 - [ ] make sure value dimensions can be 16, 32, 64, or 128 using the templating strategy recommended by Arthur
 - [ ] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing

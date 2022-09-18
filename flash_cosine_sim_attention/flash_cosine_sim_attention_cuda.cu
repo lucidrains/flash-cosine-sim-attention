@@ -58,6 +58,7 @@ struct smem_fragment {
     T* smem;
     int N;
     int M;
+    bool transposed = false;
 
     __device__ smem_fragment(char* shared_base, int N, int M)
       : smem(reinterpret_cast<T*>(shared_base)), N(N), M(M) { }
@@ -72,22 +73,27 @@ struct smem_fragment {
         return smem[index];
     }
 
+    __device__ int get_row() {
+        return transposed ? N : M;
+    }
+
+    __device__ int get_col() {
+        return transposed ? M : N;
+    }
+
     __device__ T get_transpose(int index) {
         int i = index % N;
         int j = index / M;
         return smem[i * M + j];
     }
 
-    __device__ void transpose_with(smem_fragment smem_fragment_buffer, bool swap_row_col) {
+    __device__ void transpose_with(smem_fragment smem_fragment_buffer) {
         T* buffer = smem_fragment_buffer.smem;
 
-        int row = swap_row_col ? M : N;
-        int col = swap_row_col ? N : M;
-
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int y = i / row;
-            int x = i % row;
-            buffer[x * col + y] = smem[i];
+            int y = i / get_row();
+            int x = i % get_row();
+            buffer[x * get_col() + y] = smem[i];
         }
 
         __syncthreads();
@@ -97,6 +103,8 @@ struct smem_fragment {
         }
 
         __syncthreads();
+
+        transposed = !transposed;
     }
 
     template<typename accessor>
@@ -125,6 +133,8 @@ struct smem_fragment {
 
             smem[y * N + x] = gmem[gmem_y][y];
         }
+
+        transposed = true;
     }
 
     template<typename accessor, typename accessor_mask>
@@ -147,6 +157,8 @@ struct smem_fragment {
 
             smem[y * N + x] = gmem[gmem_y][y];
         }
+
+        transposed = true;
     }
 
     template<typename accessor>
@@ -1021,7 +1033,7 @@ __global__ void backward_kernel(
 
             mma.store(sm_attn.smem);
 
-            sm_q.transpose_with(sm_do, false);
+            sm_q.transpose_with(sm_do);
 
             // calculate dk
 
@@ -1031,7 +1043,7 @@ __global__ void backward_kernel(
 
             __syncthreads();
 
-            sm_k.transpose_with(sm_do, false);
+            sm_k.transpose_with(sm_do);
 
             // calculate dq
 
@@ -1053,7 +1065,7 @@ __global__ void backward_kernel(
 
             __syncthreads();
 
-            sm_k.transpose_with(sm_do, true);
+            sm_k.transpose_with(sm_do);
         }
 
         dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
