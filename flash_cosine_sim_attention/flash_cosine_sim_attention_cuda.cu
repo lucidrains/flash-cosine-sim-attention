@@ -371,6 +371,23 @@ struct mma_warp_tile {
         }
     }
 
+    template<typename accessor>
+    __device__ void store(accessor gmem, int tile_x_offset, int tile_y_offset, int max_x, int max_y) {
+        #pragma unroll
+        for (int i = 0; i < N_thread; i++) {
+            #pragma unroll
+            for (int j = 0; j < M_thread ; j++) {
+                int gmem_y = thread_y + i * N_warp + tile_y_offset;
+                int gmem_x = thread_x + j * M_warp + tile_x_offset;
+
+                if (gmem_y >= max_y || gmem_x >= max_x)
+                    continue;
+
+                gmem[gmem_y][gmem_x] = C_frag[i * M_thread + j];
+            }
+        }
+    }
+
     // atomic add from registers go global memory
 
     template<typename accessor>
@@ -733,8 +750,6 @@ template <typename scalar_t>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-    const PackedAccessor<scalar_t, 3> l,
-          PackedAccessor<scalar_t, 4> d_out_scaled,
           PackedAccessor<scalar_t, 4> delta
 ) {
     const int heads = o.size(1);
@@ -756,32 +771,17 @@ __global__ void backward_preprocess(
 
     scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
     scalar_t* sm_do     = reinterpret_cast<scalar_t*>(&sm_delta[cdiv(v_dim, 32)]);
-    scalar_t* sm_rowsum = reinterpret_cast<scalar_t*>(&sm_do[v_dim]);
 
     auto do_ = d_out[batch_idx][head_idx][seq_idx];
     auto o_ = o[batch_idx][head_idx][seq_idx];
-    auto l_ = l[batch_idx][head_idx];
-    auto do_scaled_ = d_out_scaled[batch_idx][head_idx][seq_idx];
     auto delta_ = delta[batch_idx][head_idx][seq_idx];
-
-    // load rowsum into shared memory
-
-    if (dim_idx == 0)
-        sm_rowsum[0] = l_[seq_idx];
-
-    __syncthreads();
 
     // load do into shared memory
 
     if (dim_idx < v_dim)
-        sm_do[dim_idx] = do_[dim_idx] / max(sm_rowsum[0], 1e-10);
+        sm_do[dim_idx] = do_[dim_idx];
 
     __syncthreads();
-
-    // store do_scaled to gmem
-
-    if (dim_idx < v_dim)
-        do_scaled_[dim_idx] = sm_do[dim_idx];
 
     // load do_scaled * o into registers
 
@@ -826,6 +826,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
+    const PackedAccessor<scalar_t, 3> l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<scalar_t, 4> dq,
@@ -860,6 +861,7 @@ __global__ void backward_kernel(
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
     auto v_ = v[batch_idx][head_idx];
+    auto l_ = l[batch_idx][head_idx];
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
@@ -880,7 +882,8 @@ __global__ void backward_kernel(
 
     mma_warp_tile<scalar_t, 2, 2> mma;
     mma_warp_tile<scalar_t, 2, 4> dv_mma;
-    mma_warp_tile<scalar_t, 2, 4> qk_tmp_mma;
+    mma_warp_tile<scalar_t, 2, 4> dk_mma;
+    mma_warp_tile<scalar_t, 2, 4> dq_mma;
 
     // tiles
 
@@ -908,6 +911,10 @@ __global__ void backward_kernel(
         sm_k.load_transpose(k_, tile_x, has_mask, mask_, k_seq_len);
 
         sm_v.load_transpose(v_, tile_x, k_seq_len);
+
+        dk_mma.zero();
+
+        dv_mma.zero();
 
         // loop over rows
 
@@ -945,17 +952,29 @@ __global__ void backward_kernel(
 
                 bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
 
-                return __expf((scale * el + bias) - scale);
+                return expf((scale * el + bias) - scale);
 
             });
+
+            // manually do loop to divide by rowsums
+
+            #pragma unroll
+            for (int i = 0; i < mma.N_thread; i++) {
+                int global_row = row_offset + i * mma.N_warp + mma.thread_y;
+
+                scalar_t row_val = l_[global_row];
+
+                #pragma unroll
+                for (int j = 0; j < mma.M_thread ; j++) {
+                    mma.C_frag[i * mma.M_thread + j] /= max(row_val, 1e-20);
+                }
+            }
 
             __syncthreads();
 
             mma.store(sm_attn.smem);
 
             __syncthreads();
-
-            dv_mma.zero();
 
             // accumulate dv to global mem
 
@@ -964,10 +983,6 @@ __global__ void backward_kernel(
             }
 
             __syncthreads();
-
-            // atomic add to dv for now
-
-            dv_mma.atomic_add(dv_, 0, col_offset, v_dim, k_seq_len);
 
             // calculate dp
 
@@ -1015,30 +1030,25 @@ __global__ void backward_kernel(
 
             // calculate dk
 
-            dv_mma.zero();
-
             for (int d = 0; d < mma.N_tile; d++) {
-                dv_mma.mma(sm_attn, sm_q, d);
+                dk_mma.mma(sm_attn, sm_q, d);
             }
-
-            dv_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
 
             __syncthreads();
 
-            mma.store_transpose(sm_attn.smem);
             sm_k.load(k_, tile_x, k_seq_len);
 
             __syncthreads();
 
             // calculate dq
 
-            dv_mma.zero();
+            dq_mma.zero();
 
             for (int d = 0; d < mma.M_tile; d++) {
-                dv_mma.mma(sm_attn, sm_k, d);
+                dq_mma.mma_transpose_a(sm_attn, sm_k, d);
             }
 
-            dv_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
+            dq_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
 
             __syncthreads();
 
@@ -1046,6 +1056,10 @@ __global__ void backward_kernel(
 
             __syncthreads();
         }
+
+        dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
+
+        dk_mma.store(dk_, 0, col_offset, k_dim, k_seq_len);
     }
 }
 
@@ -1081,7 +1095,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     // setup dq, dk, dv
 
-    auto d_out_scaled = at::empty_like(d_out, options);
     auto delta = at::empty({batch, heads, seq, 1}, options);
 
     auto dq = at::zeros_like(q, options);
@@ -1120,8 +1133,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
         backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
             ACCESSOR(d_out, 4, scalar_t),
             ACCESSOR(o, 4, scalar_t),
-            ACCESSOR(l, 3, scalar_t),
-            ACCESSOR(d_out_scaled, 4, scalar_t),
             ACCESSOR(delta, 4, scalar_t)
         );
 
@@ -1129,13 +1140,14 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(q, 4, scalar_t),
             ACCESSOR(k, 4, scalar_t),
             ACCESSOR(v, 4, scalar_t),
+            ACCESSOR(l, 3, scalar_t),
             ACCESSOR(mask, 2, bool),
             ACCESSOR(attn_bias, 3, scalar_t),
             ACCESSOR(dq, 4, scalar_t),
             ACCESSOR(dk, 4, scalar_t),
             ACCESSOR(dv, 4, scalar_t),
             ACCESSOR(db, 3, scalar_t),
-            ACCESSOR(d_out_scaled, 4, scalar_t),
+            ACCESSOR(d_out, 4, scalar_t),
             ACCESSOR(delta, 4, scalar_t),
             scale,
             causal,

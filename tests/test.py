@@ -25,12 +25,12 @@ def test_output_equal(
     qk_dim_head,
     v_dim_head
 ):
-    q = torch.randn(2, 4, seq_len, qk_dim_head).cuda()
-    k = torch.randn(2, 4, seq_len, qk_dim_head).cuda()
-    v = torch.randn(2, 4, seq_len, v_dim_head).cuda()
+    q = torch.randn(4, 8, seq_len, qk_dim_head).cuda()
+    k = torch.randn(4, 8, seq_len, qk_dim_head).cuda()
+    v = torch.randn(4, 8, seq_len, v_dim_head).cuda()
 
-    attn_mask = torch.randint(0, 2, (2, seq_len), dtype = torch.bool).cuda() if mask else None
-    bias = torch.randn(4, seq_len, seq_len).cuda() if attn_bias else None
+    attn_mask = torch.randint(0, 2, (4, seq_len), dtype = torch.bool).cuda() if mask else None
+    bias = torch.randn(8, seq_len, seq_len).cuda() if attn_bias else None
 
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     flash_output = flash_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
@@ -50,12 +50,12 @@ def test_grad_equal(
     qk_dim_head,
     v_dim_head
 ):
-    q = torch.randn(2, 4, seq_len, qk_dim_head).cuda().requires_grad_()
-    k = torch.randn(2, 4, seq_len, qk_dim_head).cuda().requires_grad_()
-    v = torch.randn(2, 4, seq_len, v_dim_head).cuda().requires_grad_()
+    q = torch.randn(4, 8, seq_len, qk_dim_head).cuda().requires_grad_()
+    k = torch.randn(4, 8, seq_len, qk_dim_head).cuda().requires_grad_()
+    v = torch.randn(4, 8, seq_len, v_dim_head).cuda().requires_grad_()
 
-    attn_mask = torch.randint(0, 2, (2, seq_len), dtype = torch.bool).cuda() if mask else None
-    bias = torch.randn(4, seq_len, seq_len).cuda().requires_grad_() if attn_bias else None
+    attn_mask = torch.randint(0, 2, (4, seq_len), dtype = torch.bool).cuda() if mask else None
+    bias = torch.randn(8, seq_len, seq_len).cuda().requires_grad_() if attn_bias else None
 
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     plain_output.sum().backward()
