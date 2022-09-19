@@ -913,6 +913,8 @@ __global__ void backward_kernel(
     const int num_col_tiles = cdiv(k_seq_len, mma.M_tile);
     const int num_row_tiles = cdiv(q_seq_len, mma.N_tile);
 
+    const int tile_x = blockIdx.y;
+
     // shared memory
 
     extern __shared__ char _shared_mem_backward[];
@@ -923,151 +925,138 @@ __global__ void backward_kernel(
     smem_fragment<scalar_t> sm_v {sm_k.next(), mma.M_tile, v_dim};
     smem_fragment<scalar_t> sm_do {sm_v.next(), mma.N_tile, v_dim};
 
-    // loop over columns
+    int col_offset = tile_x * mma.M_tile;
 
-    for (int tile_x = 0; tile_x < num_col_tiles; tile_x++) {
+    // load keys and values into shared memory
 
-        int col_offset = tile_x * mma.M_tile;
+    sm_k.load_transpose(k_, tile_x, has_mask, mask_, k_seq_len);
 
-        // load keys and values into shared memory
+    sm_v.load_transpose(v_, tile_x, k_seq_len);
 
-        sm_k.load_transpose(k_, tile_x, has_mask, mask_, k_seq_len);
+    dk_mma.zero();
 
-        sm_v.load_transpose(v_, tile_x, k_seq_len);
+    dv_mma.zero();
 
-        dk_mma.zero();
+    // loop over rows
 
-        dv_mma.zero();
+    for (int tile_y = 0; tile_y < num_row_tiles; tile_y++) {
 
-        // loop over rows
+        int row_offset = tile_y * mma.N_tile;
 
-        for (int tile_y = 0; tile_y < num_row_tiles; tile_y++) {
+        if (causal && (col_offset - qk_seq_len_diff) >= (mma.N_tile * (tile_y + 1)))
+            continue;
 
-            int row_offset = tile_y * mma.N_tile;
+        // load queries and scaled do into shared memories
 
-            if (causal && (col_offset - qk_seq_len_diff) >= (mma.N_tile * (tile_y + 1)))
-                continue;
+        sm_q.load_transpose(q_, tile_y, q_seq_len);
+        sm_do.load(do_, tile_y, q_seq_len);
 
-            // load queries and scaled do into shared memories
+        __syncthreads();
 
-            sm_q.load_transpose(q_, tile_y, q_seq_len);
-            sm_do.load(do_, tile_y, q_seq_len);
+        // accumulate qk similarities
 
-            __syncthreads();
+        mma.zero();
 
-            // accumulate qk similarities
-
-            mma.zero();
-
-            for (int d = 0; d < k_dim; d++) {
-                mma.mma(sm_q, sm_k, d, has_mask);
-            }
-
-            // calculate attention
-
-            mma.pointwise(tile_y, tile_x, [&](float el, int global_row, int global_col) {
-
-                if (global_row >= q_seq_len ||
-                    global_col >= k_seq_len ||
-                    causal && (global_row < (global_col - qk_seq_len_diff)))
-                    return 0.f;
-
-                bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
-
-                return expf((scale * el + bias) - scale);
-
-            });
-
-            mma.store(sm_attn.smem);
-
-            __syncthreads();
-
-            // accumulate dv to global mem
-
-            for (int d = 0; d < mma.N_tile; d++) {
-                dv_mma.mma(sm_attn, sm_do, d);
-            }
-
-            __syncthreads();
-
-            // calculate dp
-
-            mma.zero();
-
-            for (int d = 0; d < v_dim; d++) {
-                mma.mma_transpose_a(sm_do, sm_v, d);
-            }
-
-            __syncthreads();
-
-            // calculate dS
-            // just do things manually out in the open, as the operation is not very reusable
-
-            #pragma unroll
-            for (int i = 0; i < mma.N_thread; i++) {
-                int global_row = row_offset + i * mma.N_warp + mma.thread_y;
-
-                scalar_t row_val = delta_[global_row][0];
-
-                #pragma unroll
-                for (int j = 0; j < mma.M_thread ; j++) {
-                    mma.C_frag[i * mma.M_thread + j] -= row_val;
-                    mma.C_frag[i * mma.M_thread + j] *= sm_attn.get((mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x);
-                }
-            }
-
-            // store to ds_ if attention bias requires gradients
-
-            if (attn_bias_requires_grad)
-                mma.atomic_add(ds_, col_offset, row_offset, k_seq_len, q_seq_len);
-
-            // scale
-
-            mma.pointwise([&](scalar_t el) {
-                return el * scale;
-            });
-
-            mma.store(sm_attn.smem);
-
-            sm_q.transpose_with(sm_do);
-
-            // calculate dk
-
-            for (int d = 0; d < mma.N_tile; d++) {
-                dk_mma.mma(sm_attn, sm_q, d);
-            }
-
-            __syncthreads();
-
-            sm_k.transpose_with(sm_do);
-
-            // calculate dq
-
-            sm_q.load(dq_, tile_y, q_seq_len);
-
-            __syncthreads();
-
-            dq_mma.zero();
-
-            for (int d = 0; d < mma.M_tile; d++) {
-                dq_mma.mma_transpose_a(sm_attn, sm_k, d);
-            }
-
-            dq_mma.add_to(sm_q.smem);
-
-            __syncthreads();
-
-            sm_q.store(dq_, tile_y, q_seq_len);
-
-            __syncthreads();
-
-            sm_k.transpose_with(sm_do);
+        for (int d = 0; d < k_dim; d++) {
+            mma.mma(sm_q, sm_k, d, has_mask);
         }
 
-        dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
+        // calculate attention
 
-        dk_mma.store(dk_, 0, col_offset, k_dim, k_seq_len);
+        mma.pointwise(tile_y, tile_x, [&](float el, int global_row, int global_col) {
+
+            if (global_row >= q_seq_len ||
+                global_col >= k_seq_len ||
+                causal && (global_row < (global_col - qk_seq_len_diff)))
+                return 0.f;
+
+            bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
+
+            return expf((scale * el + bias) - scale);
+
+        });
+
+        mma.store(sm_attn.smem);
+
+        __syncthreads();
+
+        // accumulate dv to global mem
+
+        for (int d = 0; d < mma.N_tile; d++) {
+            dv_mma.mma(sm_attn, sm_do, d);
+        }
+
+        __syncthreads();
+
+        // calculate dp
+
+        mma.zero();
+
+        for (int d = 0; d < v_dim; d++) {
+            mma.mma_transpose_a(sm_do, sm_v, d);
+        }
+
+        __syncthreads();
+
+        // calculate dS
+        // just do things manually out in the open, as the operation is not very reusable
+
+        #pragma unroll
+        for (int i = 0; i < mma.N_thread; i++) {
+            int global_row = row_offset + i * mma.N_warp + mma.thread_y;
+
+            scalar_t row_val = delta_[global_row][0];
+
+            #pragma unroll
+            for (int j = 0; j < mma.M_thread ; j++) {
+                mma.C_frag[i * mma.M_thread + j] -= row_val;
+                mma.C_frag[i * mma.M_thread + j] *= sm_attn.get((mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x);
+            }
+        }
+
+        // store to ds_ if attention bias requires gradients
+
+        if (attn_bias_requires_grad)
+            mma.atomic_add(ds_, col_offset, row_offset, k_seq_len, q_seq_len);
+
+        // scale
+
+        mma.pointwise([&](scalar_t el) {
+            return el * scale;
+        });
+
+        mma.store(sm_attn.smem);
+
+        sm_q.transpose_with(sm_do);
+
+        // calculate dk
+
+        for (int d = 0; d < mma.N_tile; d++) {
+            dk_mma.mma(sm_attn, sm_q, d);
+        }
+
+        __syncthreads();
+
+        sm_k.transpose_with(sm_do);
+
+        // calculate dq
+
+        dq_mma.zero();
+
+        for (int d = 0; d < mma.M_tile; d++) {
+            dq_mma.mma_transpose_a(sm_attn, sm_k, d);
+        }
+
+        dq_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
+
+        __syncthreads();
+
+        sm_k.transpose_with(sm_do);
     }
+
+    dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
+
+    dk_mma.store(dk_, 0, col_offset, k_dim, k_seq_len);
 }
 
 // backwards c++ function
@@ -1092,6 +1081,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     const int batch = q.size(0);
     const int heads = q.size(1);
     const int seq   = q.size(2);
+    const int k_seq = k.size(2);
     const int k_dim = k.size(3);
     const int v_dim = v.size(3);
 
@@ -1115,12 +1105,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const dim3 backwards_preprocess_threads_per_block(next_multiple_of(v_dim, 32));
 
-    const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
     // setup backwards call
 
     const dim3 backwards_threads_per_block(256);
-    const dim3 backwards_blocks(batch * heads);
 
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
@@ -1129,6 +1117,10 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
         const int N_tile = mma_warp_tile_klass::N_tile;
         const int M_tile = mma_warp_tile_klass::M_tile;
+
+        const dim3 backwards_blocks(batch * heads, cdiv(k_seq, mma_warp_tile_klass::M_tile));
+
+        const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
         const unsigned backwards_preprocess_shared_mem_size = (cdiv(v_dim, 32) + v_dim + 1) * sizeof(scalar_t);
 
