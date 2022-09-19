@@ -8,6 +8,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - Forward kernel now only slightly behind baseline on GTX 2080Ti, but definitely faster on Ampere due to the greater amount of shared memory
 
+- Backwards kernel is still 3x slower, 1.5x slower for autoregressive
+
 ## Todo
 
 - [ ] make sure works with f16
