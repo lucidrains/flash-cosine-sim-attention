@@ -152,11 +152,7 @@ def flash_cosine_sim_attention(
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
     causal = False,
-    l2norm_qk = True,
-    backward_row_tile_size = 16,
-    backward_col_tile_size = 16,
-    backward_row_tiles = 1,
-    backward_col_tiles = 1,
+    l2norm_qk = True
 ) -> TensorType['b', 'h', 'i', 'e']:
 
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
