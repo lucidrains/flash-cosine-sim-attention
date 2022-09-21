@@ -780,7 +780,7 @@ __global__ void backward_preprocess(
 
     scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
     scalar_t* sm_do     = reinterpret_cast<scalar_t*>(&sm_delta[cdiv(v_dim, 32)]);
-    scalar_t* sm_rowsum = reinterpret_cast<scalar_t*>(&sm_do[v_dim]);
+    scalar_t* sm_inv_rowsum = reinterpret_cast<scalar_t*>(&sm_do[v_dim]);
 
     auto do_ = d_out[batch_idx][head_idx][seq_idx];
     auto o_ = o[batch_idx][head_idx][seq_idx];
@@ -791,14 +791,14 @@ __global__ void backward_preprocess(
     // load rowsum into shared memory
 
     if (dim_idx == 0)
-        sm_rowsum[0] = l_[seq_idx];
+        sm_inv_rowsum[0] = 1.f / max(l_[seq_idx], 1e-10);
 
     __syncthreads();
 
     // load do into shared memory
 
     if (dim_idx < v_dim)
-        sm_do[dim_idx] = do_[dim_idx] / max(sm_rowsum[0], 1e-10);
+        sm_do[dim_idx] = do_[dim_idx] * sm_inv_rowsum[0];
 
     __syncthreads();
 
