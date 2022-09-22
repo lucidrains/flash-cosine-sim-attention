@@ -82,9 +82,9 @@ struct smem_fragment {
     }
 
     __device__ T get_transpose(int index) {
-        int i = index % N;
-        int j = index / M;
-        return smem[i * M + j];
+        int i = index % get_col();
+        int j = index / get_col();
+        return smem[i * get_row() + j];
     }
 
     __device__ void transpose_with(smem_fragment smem_fragment_buffer) {
@@ -250,7 +250,7 @@ struct mma_warp_tile {
         // Load a N x 1 fragment of A from shared memory to registers:
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
-            int sm_idx = i * N_warp + thread_y + k * A_sm.get_row();
+            int sm_idx = i * N_warp + thread_y + k * N_tile;
             A_frag[i] = !transpose_a ? A_sm.get(sm_idx) : A_sm.get_transpose(sm_idx);
         }
 
@@ -307,6 +307,22 @@ struct mma_warp_tile {
         int k
     ) {
         return mma_full(A_sm, B_sm, k, false, true, false);
+    }
+
+    __device__ void mma_transpose_ab(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k
+    ) {
+        return mma_full(A_sm, B_sm, k, false, true, true);
+    }
+
+    __device__ void mma_transpose_b(
+        smem_fragment<scalar_t> A_sm,
+        smem_fragment<scalar_t> B_sm,
+        int k
+    ) {
+        return mma_full(A_sm, B_sm, k, false, false, true);
     }
 
     // Perform a pointwise operation, specified by the given lambda, on C
@@ -1027,31 +1043,27 @@ __global__ void backward_kernel(
 
         mma.store(sm_attn.smem);
 
-        sm_q.transpose_with(sm_do);
+        __syncthreads();
 
         // calculate dk
 
         for (int d = 0; d < mma.N_tile; d++) {
-            dk_mma.mma(sm_attn, sm_q, d);
+            dk_mma.mma_transpose_b(sm_attn, sm_q, d);
         }
 
         __syncthreads();
-
-        sm_k.transpose_with(sm_do);
 
         // calculate dq
 
         dq_mma.zero();
 
         for (int d = 0; d < mma.M_tile; d++) {
-            dq_mma.mma_transpose_a(sm_attn, sm_k, d);
+            dq_mma.mma_transpose_ab(sm_attn, sm_k, d);
         }
 
         dq_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
 
         __syncthreads();
-
-        sm_k.transpose_with(sm_do);
     }
 
     dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
