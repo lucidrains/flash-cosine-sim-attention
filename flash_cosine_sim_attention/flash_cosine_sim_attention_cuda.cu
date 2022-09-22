@@ -87,26 +87,6 @@ struct smem_fragment {
         return smem[i * get_row() + j];
     }
 
-    __device__ void transpose_with(smem_fragment smem_fragment_buffer) {
-        T* buffer = smem_fragment_buffer.smem;
-
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            int y = i / get_row();
-            int x = i % get_row();
-            buffer[x * get_col() + y] = smem[i];
-        }
-
-        __syncthreads();
-
-        for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
-            smem[i] = buffer[i];
-        }
-
-        __syncthreads();
-
-        transposed = !transposed;
-    }
-
     template<typename accessor>
     __device__ void load(accessor gmem, int tile_y, int max_y) {
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
@@ -240,8 +220,8 @@ struct mma_warp_tile {
     // Performs C = A * B + C
 
     __device__ void mma_full(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
+        smem_fragment<scalar_t>& A_sm,
+        smem_fragment<scalar_t>& B_sm,
         int k,
         bool has_mask,
         bool transpose_a,
@@ -285,8 +265,8 @@ struct mma_warp_tile {
     }
 
     __device__ void mma(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
+        smem_fragment<scalar_t>& A_sm,
+        smem_fragment<scalar_t>& B_sm,
         int k,
         bool has_mask
     ) {
@@ -294,32 +274,32 @@ struct mma_warp_tile {
     }
 
     __device__ void mma(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
+        smem_fragment<scalar_t>& A_sm,
+        smem_fragment<scalar_t>& B_sm,
         int k
     ) {
         return mma_full(A_sm, B_sm, k, false, false, false);
     }
 
     __device__ void mma_transpose_a(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
+        smem_fragment<scalar_t>& A_sm,
+        smem_fragment<scalar_t>& B_sm,
         int k
     ) {
         return mma_full(A_sm, B_sm, k, false, true, false);
     }
 
     __device__ void mma_transpose_ab(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
+        smem_fragment<scalar_t>& A_sm,
+        smem_fragment<scalar_t>& B_sm,
         int k
     ) {
         return mma_full(A_sm, B_sm, k, false, true, true);
     }
 
     __device__ void mma_transpose_b(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
+        smem_fragment<scalar_t>& A_sm,
+        smem_fragment<scalar_t>& B_sm,
         int k
     ) {
         return mma_full(A_sm, B_sm, k, false, false, true);
@@ -599,8 +579,8 @@ __global__ void forward_kernel(
     const int k_seq_len = K.size(2);
     const int qk_seq_len_diff = k_seq_len - q_seq_len;  // for calculating causality when query and key lengths differ
 
-    const int D = Q.size(3);
-    const int E = V.size(3);
+    const int k_dim = Q.size(3);
+    const int v_dim = V.size(3);
 
 
     const int batch = blockIdx.y / Q.size(1);
@@ -629,10 +609,10 @@ __global__ void forward_kernel(
 
     extern __shared__ char _shared_mem[];
 
-    smem_fragment<scalar_t> Q_sm{_shared_mem, QK_mma.N_tile, D};
+    smem_fragment<scalar_t> Q_sm{_shared_mem, QK_mma.N_tile, k_dim};
     smem_fragment<scalar_t> A_sm{Q_sm.next(), QK_mma.N_tile, QK_mma.M_tile};
-    smem_fragment<scalar_t> K_sm{A_sm.next(), QK_mma.M_tile, D};
-    smem_fragment<scalar_t> V_sm{A_sm.next(), QK_mma.M_tile, E};
+    smem_fragment<scalar_t> K_sm{A_sm.next(), QK_mma.M_tile, k_dim};
+    smem_fragment<scalar_t> V_sm{A_sm.next(), QK_mma.M_tile, v_dim};
 
     // helper variables
 
@@ -654,7 +634,7 @@ __global__ void forward_kernel(
 
         QK_mma.zero();
 
-        for (int d = 0; d < D; d++) {
+        for (int d = 0; d < k_dim; d++) {
             QK_mma.mma(Q_sm, K_sm, d, has_mask);
         }
 
