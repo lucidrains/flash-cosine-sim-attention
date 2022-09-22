@@ -688,19 +688,19 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     const int batch = Q.size(0);
     const int heads = Q.size(1);
-    const int N = Q.size(2);
-    const int M = K.size(2);
-    const int D = Q.size(3);
-    const int E = V.size(3);
+    const int q_seq_len = Q.size(2);
+    const int k_seq_len = K.size(2);
+    const int k_dim = Q.size(3);
+    const int v_dim = V.size(3);
 
     auto options = torch::TensorOptions().device(query_device).dtype(Q.scalar_type());
 
-    auto O = at::empty({batch, heads, N, E}, options);
-    auto L = at::empty({batch, heads, need_store_rowsum ? N : 0}, options);
+    auto O = at::empty({batch, heads, q_seq_len, v_dim}, options);
+    auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options);
 
     const dim3 threads_per_block(256);
 
-    const int max_feature_dimension = max(D, E);
+    const int max_feature_dimension = max(k_dim, v_dim);
 
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
@@ -709,11 +709,13 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
         using mma_warp_tile_klass = mma_warp_tile<scalar_t, 4, 4>;
 
-        const dim3 blocks(cdiv(N, mma_warp_tile_klass::N_tile), batch * heads);
+        const dim3 blocks(cdiv(q_seq_len, mma_warp_tile_klass::N_tile), batch * heads);
 
-        const unsigned shared_mem_size = (mma_warp_tile_klass::N_tile * max_feature_dimension +
-                                          mma_warp_tile_klass::M_tile * max_feature_dimension +
-                                          mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile) * sizeof(scalar_t);
+        const unsigned shared_mem_size = (
+            mma_warp_tile_klass::N_tile * max_feature_dimension +
+            mma_warp_tile_klass::M_tile * max_feature_dimension +
+            mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile
+        ) * sizeof(scalar_t);
 
         forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
             ACCESSOR(Q, 4, scalar_t),
@@ -1114,13 +1116,16 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
         const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
-        const unsigned backwards_preprocess_shared_mem_size = (cdiv(v_dim, 32) + v_dim + 1) * sizeof(scalar_t);
+        const unsigned backwards_preprocess_shared_mem_size = (
+            cdiv(v_dim, 32) + v_dim + 1
+        ) * sizeof(scalar_t);
 
-        const unsigned backwards_shared_mem_size = (  (N_tile + M_tile) * k_dim +      // q, k
-                                                      (N_tile + M_tile) * v_dim +      // v, do
-                                                      (N_tile * M_tile) +              // attn
-                                                      N_tile                           // delta
-                                                    ) * sizeof(scalar_t);
+        const unsigned backwards_shared_mem_size = (
+            (N_tile + M_tile) * k_dim +      // q, k
+            (N_tile + M_tile) * v_dim +      // v, do
+            (N_tile * M_tile) +              // attn
+             N_tile                          // delta
+        ) * sizeof(scalar_t);
 
         backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
             ACCESSOR(d_out, 4, scalar_t),
