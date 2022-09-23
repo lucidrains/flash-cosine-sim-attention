@@ -837,7 +837,7 @@ __global__ void backward_preprocess(
 
 // main backward kernel
 
-template <typename scalar_t>
+template <typename scalar_t, int dv_m_threads>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -895,7 +895,7 @@ __global__ void backward_kernel(
     // mma
 
     mma_warp_tile<scalar_t, 2, 2> mma;
-    mma_warp_tile<scalar_t, 2, 4> dv_mma;
+    mma_warp_tile<scalar_t, 2, dv_m_threads> dv_mma;
     mma_warp_tile<scalar_t, 2, 4> dk_mma;
     mma_warp_tile<scalar_t, 2, 4> dq_mma;
 
@@ -1048,6 +1048,7 @@ __global__ void backward_kernel(
 
 // backwards c++ function
 
+template<int dv_m_threads>
 std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
@@ -1128,7 +1129,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(delta, 4, scalar_t)
         );
 
-        backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
+        backward_kernel<scalar_t, dv_m_threads><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
             ACCESSOR(q, 4, scalar_t),
             ACCESSOR(k, 4, scalar_t),
             ACCESSOR(v, 4, scalar_t),
@@ -1162,5 +1163,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward_value_64", &flash_cosine_sim_attention_forward<4>, "Flash Cosine-Sim Attention Forward (value 64)");
     m.def("forward_value_32", &flash_cosine_sim_attention_forward<2>, "Flash Cosine-Sim Attention Forward (value 32)");
-    m.def("backward", &flash_cosine_sim_attention_backward, "Flash Cosine-Sim Attention Backward");
+    m.def("backward_value_64", &flash_cosine_sim_attention_backward<4>, "Flash Cosine-Sim Attention Backward (value 64)");
+    m.def("backward_value_32", &flash_cosine_sim_attention_backward<2>, "Flash Cosine-Sim Attention Backward (value 32)");
 }

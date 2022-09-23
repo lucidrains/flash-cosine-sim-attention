@@ -11,7 +11,8 @@ try:
     from flash_cosine_sim_attention_cuda import (
         forward_value_64,
         forward_value_32,
-        backward
+        backward_value_64,
+        backward_value_32
     )
 except ImportError:
     print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')
@@ -98,8 +99,10 @@ class FlashCosineSimAttention(Function):
 
         if v_dim == 64:
             forward = forward_value_64
+            backward = backward_value_64
         elif v_dim == 32:
             forward = forward_value_32
+            backward = backward_value_32
         else:
             raise ValueError('invalid value dimension')
 
@@ -121,7 +124,8 @@ class FlashCosineSimAttention(Function):
 
         ctx.params = (
             scale,
-            causal
+            causal,
+            backward
         )
 
         return o
@@ -136,7 +140,8 @@ class FlashCosineSimAttention(Function):
 
         (
             scale,
-            causal
+            causal,
+            backward
         ) = ctx.params
 
         dq, dk, dv, db = backward(
