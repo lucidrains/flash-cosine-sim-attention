@@ -204,7 +204,7 @@ struct mma_warp_tile {
         warp_x = (warp_id % M_block);
         warp_y = (warp_id / M_block);
 
-        int lane_id = threadIdx.x % 32;
+        int lane_id = threadIdx.x & 31;
         thread_x = warp_x * M_warp * M_thread + lane_id % M_warp;
         thread_y = warp_y * N_warp * N_thread + lane_id / M_warp;
     }
@@ -352,17 +352,6 @@ struct mma_warp_tile {
         }
     }
 
-    __device__ void add_to(scalar_t* C_sm_ptr) {
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            #pragma unroll
-            for (int j = 0; j < M_thread ; j++) {
-                C_sm_ptr[(thread_y + i * N_warp) * M_tile + j * M_warp + thread_x]
-                    += C_frag[i * M_thread + j];
-            }
-        }
-    }
-
     __device__ void store_transpose(scalar_t* C_sm_ptr) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
@@ -433,6 +422,8 @@ struct out_mma_warp_tile {
 
     static constexpr float EPS = 1e-10;
 
+    float divisor;
+
     // Registers:
     float A_frag[N_thread];            // N x 1 fragment
     float B_frag[M_thread];            // 1 x M fragment
@@ -444,12 +435,12 @@ struct out_mma_warp_tile {
     int thread_x; // x offset of the thread within the warp tile
     int thread_y; // y offset of the thread within the warp tile
 
-    __device__ out_mma_warp_tile() {
+    __device__ out_mma_warp_tile(float divisor) : divisor(divisor) {
         int warp_id = threadIdx.x / 32;
         warp_x = (warp_id % M_block);
         warp_y = (warp_id / M_block);
 
-        int lane_id = threadIdx.x % 32;
+        int lane_id = threadIdx.x & 31;
         thread_x = warp_x * M_warp * M_thread + lane_id % M_warp;
         thread_y = warp_y * N_warp * N_thread + lane_id / M_warp;
     }
@@ -492,7 +483,7 @@ struct out_mma_warp_tile {
 
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
-                C_frag[i * M_thread + j] += A_frag[i] * B_frag[j];
+                C_frag[i * M_thread + j] += A_frag[i] * B_frag[j] / divisor;
             }
         }
     }
@@ -515,7 +506,7 @@ struct out_mma_warp_tile {
     __device__ void store(accessor gmem, int tile_y, int max_y) {
         #pragma unroll
         for (int i = 0; i < N_thread; i++) {
-            float inv_rowsum = 1.f / max(L_frag[i], EPS);
+            float inv_rowsum = divisor / max(L_frag[i], EPS);
 
             #pragma unroll
             for (int j = 0; j < M_thread ; j++) {
@@ -582,7 +573,6 @@ __global__ void forward_kernel(
     const int k_dim = Q.size(3);
     const int v_dim = V.size(3);
 
-
     const int batch = blockIdx.y / Q.size(1);
     const int heads = blockIdx.y % Q.size(1);
 
@@ -598,7 +588,7 @@ __global__ void forward_kernel(
     // mma
 
     mma_warp_tile<scalar_t, 4, 4> QK_mma;
-    out_mma_warp_tile<scalar_t, 4, out_m_threads> out_mma;
+    out_mma_warp_tile<scalar_t, 4, out_m_threads> out_mma {(float) k_seq_len};
 
     // tiles
 
@@ -667,8 +657,10 @@ __global__ void forward_kernel(
 
     out_mma.store(O_, tile_y, q_seq_len);
 
-    if (need_store_rowsum)
-        out_mma.store_rowsum(L_, tile_y, q_seq_len);
+    if (!need_store_rowsum)
+        return;
+
+    out_mma.store_rowsum(L_, tile_y, q_seq_len);
 }
 
 // forwards c++ function
