@@ -411,11 +411,11 @@ struct mma_warp_tile {
     }
 };
 
-template<typename scalar_t>
+template<typename scalar_t, int n_thread, int m_thread>
 struct out_mma_warp_tile {
     // How much data is processed by a single thread:
-    static constexpr int N_thread = 4;
-    static constexpr int M_thread = 4;
+    static constexpr int N_thread = n_thread;
+    static constexpr int M_thread = m_thread;
 
     // Thread layout within a warp:
     static constexpr int N_warp = 8;
@@ -559,7 +559,7 @@ struct out_mma_warp_tile {
 
 // forward kernel
 
-template<typename scalar_t>
+template<typename scalar_t, int out_m_threads>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> Q,
     const PackedAccessor<scalar_t, 4> K,
@@ -598,7 +598,7 @@ __global__ void forward_kernel(
     // mma
 
     mma_warp_tile<scalar_t, 4, 4> QK_mma;
-    out_mma_warp_tile<scalar_t> out_mma;
+    out_mma_warp_tile<scalar_t, 4, out_m_threads> out_mma;
 
     // tiles
 
@@ -673,6 +673,7 @@ __global__ void forward_kernel(
 
 // forwards c++ function
 
+template<int out_m_threads>
 std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor Q,
     torch::Tensor K,
@@ -717,7 +718,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
             mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile
         ) * sizeof(scalar_t);
 
-        forward_kernel<scalar_t><<<blocks, threads_per_block, shared_mem_size>>>(
+        forward_kernel<scalar_t, out_m_threads><<<blocks, threads_per_block, shared_mem_size>>>(
             ACCESSOR(Q, 4, scalar_t),
             ACCESSOR(K, 4, scalar_t),
             ACCESSOR(V, 4, scalar_t),
@@ -1167,6 +1168,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 // bind
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward", &flash_cosine_sim_attention_forward, "Flash Cosine-Sim Attention Forward");
+    m.def("forward_value_64", &flash_cosine_sim_attention_forward<4>, "Flash Cosine-Sim Attention Forward (value 64)");
+    m.def("forward_value_32", &flash_cosine_sim_attention_forward<2>, "Flash Cosine-Sim Attention Forward (value 32)");
     m.def("backward", &flash_cosine_sim_attention_backward, "Flash Cosine-Sim Attention Backward");
 }

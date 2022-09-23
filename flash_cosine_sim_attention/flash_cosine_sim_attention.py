@@ -8,7 +8,11 @@ from torch.autograd import Function
 # try to import cuda
 
 try:
-    from flash_cosine_sim_attention_cuda import forward, backward
+    from flash_cosine_sim_attention_cuda import (
+        forward_value_64,
+        forward_value_32,
+        backward
+    )
 except ImportError:
     print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')
 
@@ -82,7 +86,7 @@ class FlashCosineSimAttention(Function):
         scale,
         causal
     ):
-        assert v.shape[-1] == 64, 'value dimension is fixed at 64 for now'
+        v_dim = v.shape[-1]
 
         batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
 
@@ -91,6 +95,13 @@ class FlashCosineSimAttention(Function):
         attn_bias = default(attn_bias, torch.empty(1, 0, 0, device = q.device, dtype = dtype))
 
         should_backwards = any([*map(lambda t: t.requires_grad, (q, k, v, attn_bias))])
+
+        if v_dim == 64:
+            forward = forward_value_64
+        elif v_dim == 32:
+            forward = forward_value_32
+        else:
+            raise ValueError('invalid value dimension')
 
         o, l = forward(
             q, k, v,

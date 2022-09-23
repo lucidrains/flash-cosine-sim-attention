@@ -16,7 +16,7 @@ def allclose(a, b, atol = 1e-4):
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
 @pytest.mark.parametrize('qk_dim_head', [32, 64])
-@pytest.mark.parametrize('v_dim_head', [64])
+@pytest.mark.parametrize('v_dim_head', [64, 32])
 def test_output_equal(
     causal,
     mask,
