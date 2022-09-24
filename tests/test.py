@@ -40,7 +40,7 @@ def test_output_equal(
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('qk_dim_head', [64])
+@pytest.mark.parametrize('qk_dim_head', [64, 32])
 @pytest.mark.parametrize('v_dim_head', [64, 32])
 def test_grad_equal(
     causal,
