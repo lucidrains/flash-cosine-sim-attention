@@ -908,6 +908,9 @@ __global__ void backward_kernel(
 
     const int tile_x = blockIdx.y;
 
+    const int num_row_tiles_per_block = cdiv(num_row_tiles, gridDim.z);
+    const int tile_y_start = blockIdx.z * num_row_tiles_per_block;
+
     // shared memory
 
     extern __shared__ char _shared_mem_backward[];
@@ -932,7 +935,7 @@ __global__ void backward_kernel(
 
     // loop over rows
 
-    for (int tile_y = 0; tile_y < num_row_tiles; tile_y++) {
+    for (int tile_y = tile_y_start; tile_y < (tile_y_start + num_row_tiles_per_block); tile_y++) {
 
         int row_offset = tile_y * mma.N_tile;
 
@@ -1043,9 +1046,16 @@ __global__ void backward_kernel(
         __syncthreads();
     }
 
-    dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
+    if (gridDim.z == 1) {
+        dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
 
-    dk_mma.store(dk_, 0, col_offset, k_dim, k_seq_len);
+        dk_mma.store(dk_, 0, col_offset, k_dim, k_seq_len);
+
+    } else {
+        dv_mma.atomic_add(dv_, 0, col_offset, v_dim, k_seq_len);
+
+        dk_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
+    }
 }
 
 // backwards c++ function
@@ -1100,7 +1110,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const dim3 backwards_threads_per_block(256);
 
-
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
 
         using mma_warp_tile_klass = mma_warp_tile<scalar_t, 2, 2>;
@@ -1108,7 +1117,13 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
         const int N_tile = mma_warp_tile_klass::N_tile;
         const int M_tile = mma_warp_tile_klass::M_tile;
 
-        const dim3 backwards_blocks(batch * heads, cdiv(k_seq, mma_warp_tile_klass::M_tile));
+        const int blocks_per_row = 2;
+
+        const dim3 backwards_blocks(
+            batch * heads,
+            cdiv(k_seq, mma_warp_tile_klass::M_tile),
+            min(blocks_per_row, cdiv(seq, mma_warp_tile_klass::N_tile))
+        );
 
         const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
