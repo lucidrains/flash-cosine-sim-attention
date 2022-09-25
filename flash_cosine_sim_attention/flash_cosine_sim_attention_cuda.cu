@@ -552,7 +552,7 @@ struct out_mma_warp_tile {
 
 // forward kernel
 
-template<typename scalar_t, int out_m_threads>
+template<typename scalar_t, int attn_n_threads, int attn_m_threads, int out_m_threads>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> Q,
     const PackedAccessor<scalar_t, 4> K,
@@ -589,8 +589,8 @@ __global__ void forward_kernel(
 
     // mma
 
-    mma_warp_tile<scalar_t, 4, 4> QK_mma;
-    out_mma_warp_tile<scalar_t, 4, out_m_threads> out_mma {(float) k_seq_len};
+    mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads> QK_mma;
+    out_mma_warp_tile<scalar_t, attn_m_threads, out_m_threads> out_mma {(float) k_seq_len};
 
     // tiles
 
@@ -663,78 +663,6 @@ __global__ void forward_kernel(
         return;
 
     out_mma.store_rowsum(L_, tile_y, q_seq_len);
-}
-
-// forwards c++ function
-
-template<int out_m_threads>
-std::vector<at::Tensor> flash_cosine_sim_attention_forward(
-    torch::Tensor Q,
-    torch::Tensor K,
-    torch::Tensor V,
-    torch::Tensor mask,
-    torch::Tensor attn_bias,
-    float scale,
-    bool causal,
-    bool need_store_rowsum
-) {
-    auto query_device = device_of(Q);
-    const at::cuda::OptionalCUDAGuard device_guard(query_device);
-
-    const int batch = Q.size(0);
-    const int heads = Q.size(1);
-    const int q_seq_len = Q.size(2);
-    const int k_seq_len = K.size(2);
-    const int k_dim = Q.size(3);
-    const int v_dim = V.size(3);
-
-    auto options = torch::TensorOptions().device(query_device).dtype(Q.scalar_type());
-
-    auto O = at::empty({batch, heads, q_seq_len, v_dim}, options);
-    auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options);
-
-    const dim3 threads_per_block(256);
-
-    const int max_feature_dimension = max(k_dim, v_dim);
-
-    const bool has_attn_bias = !!attn_bias.numel();
-    const bool has_mask = !!mask.numel();
-
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(Q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
-
-        using mma_warp_tile_klass = mma_warp_tile<scalar_t, 4, 4>;
-
-        const dim3 blocks(cdiv(q_seq_len, mma_warp_tile_klass::N_tile), batch * heads);
-
-        const unsigned shared_mem_size = (
-            mma_warp_tile_klass::N_tile * max_feature_dimension +
-            mma_warp_tile_klass::M_tile * max_feature_dimension +
-            mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile
-        ) * sizeof(scalar_t);
-
-        forward_kernel<scalar_t, out_m_threads><<<blocks, threads_per_block, shared_mem_size>>>(
-            ACCESSOR(Q, 4, scalar_t),
-            ACCESSOR(K, 4, scalar_t),
-            ACCESSOR(V, 4, scalar_t),
-            ACCESSOR(O, 4, scalar_t),
-            ACCESSOR(L, 3, scalar_t),
-            ACCESSOR(mask, 2, bool),
-            ACCESSOR(attn_bias, 3, scalar_t),
-            scale,
-            causal,
-            has_mask,
-            has_attn_bias,
-            need_store_rowsum
-        );
-    }));
-
-    // handle error
-
-    cudaDeviceSynchronize();
-
-    CHECK_LAST_CUDA_ERROR();
-
-    return { O, L };
 }
 
 // backward kernel
@@ -839,7 +767,7 @@ __global__ void backward_preprocess(
 
 // main backward kernel
 
-template <typename scalar_t, int dqk_m_threads, int dv_m_threads>
+template <typename scalar_t, int attn_n_threads, int attn_m_threads, int dqk_m_threads, int dv_m_threads>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -896,10 +824,10 @@ __global__ void backward_kernel(
 
     // mma
 
-    mma_warp_tile<scalar_t, 2, 2> mma;
-    mma_warp_tile<scalar_t, 2, dqk_m_threads> dq_mma;
-    mma_warp_tile<scalar_t, 2, dqk_m_threads> dk_mma;
-    mma_warp_tile<scalar_t, 2, dv_m_threads> dv_mma;
+    mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads> mma;
+    mma_warp_tile<scalar_t, attn_n_threads, dqk_m_threads> dq_mma;
+    mma_warp_tile<scalar_t, attn_m_threads, dqk_m_threads> dk_mma;
+    mma_warp_tile<scalar_t, attn_m_threads, dv_m_threads> dv_mma;
 
     // tiles
 
@@ -1058,9 +986,81 @@ __global__ void backward_kernel(
     }
 }
 
+// forwards c++ function
+
+template<int attn_n_threads, int attn_m_threads, int out_m_threads>
+std::vector<at::Tensor> flash_cosine_sim_attention_forward(
+    torch::Tensor Q,
+    torch::Tensor K,
+    torch::Tensor V,
+    torch::Tensor mask,
+    torch::Tensor attn_bias,
+    float scale,
+    bool causal,
+    bool need_store_rowsum
+) {
+    auto query_device = device_of(Q);
+    const at::cuda::OptionalCUDAGuard device_guard(query_device);
+
+    const int batch = Q.size(0);
+    const int heads = Q.size(1);
+    const int q_seq_len = Q.size(2);
+    const int k_seq_len = K.size(2);
+    const int k_dim = Q.size(3);
+    const int v_dim = V.size(3);
+
+    auto options = torch::TensorOptions().device(query_device).dtype(Q.scalar_type());
+
+    auto O = at::empty({batch, heads, q_seq_len, v_dim}, options);
+    auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options);
+
+    const dim3 threads_per_block(256);
+
+    const int max_feature_dimension = max(k_dim, v_dim);
+
+    const bool has_attn_bias = !!attn_bias.numel();
+    const bool has_mask = !!mask.numel();
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(Q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
+
+        using mma_warp_tile_klass = mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads>;
+
+        const dim3 blocks(cdiv(q_seq_len, mma_warp_tile_klass::N_tile), batch * heads);
+
+        const unsigned shared_mem_size = (
+            mma_warp_tile_klass::N_tile * max_feature_dimension +
+            mma_warp_tile_klass::M_tile * max_feature_dimension +
+            mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile
+        ) * sizeof(scalar_t);
+
+        forward_kernel<scalar_t, attn_n_threads, attn_m_threads, out_m_threads><<<blocks, threads_per_block, shared_mem_size>>>(
+            ACCESSOR(Q, 4, scalar_t),
+            ACCESSOR(K, 4, scalar_t),
+            ACCESSOR(V, 4, scalar_t),
+            ACCESSOR(O, 4, scalar_t),
+            ACCESSOR(L, 3, scalar_t),
+            ACCESSOR(mask, 2, bool),
+            ACCESSOR(attn_bias, 3, scalar_t),
+            scale,
+            causal,
+            has_mask,
+            has_attn_bias,
+            need_store_rowsum
+        );
+    }));
+
+    // handle error
+
+    cudaDeviceSynchronize();
+
+    CHECK_LAST_CUDA_ERROR();
+
+    return { O, L };
+}
+
 // backwards c++ function
 
-template<int dqk_m_threads, int dv_m_threads>
+template<int attn_n_threads, int attn_m_threads, int dqk_m_threads, int dv_m_threads>
 std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
@@ -1112,7 +1112,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
 
-        using mma_warp_tile_klass = mma_warp_tile<scalar_t, 2, 2>;
+        using mma_warp_tile_klass = mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads>;
 
         const int N_tile = mma_warp_tile_klass::N_tile;
         const int M_tile = mma_warp_tile_klass::M_tile;
@@ -1146,7 +1146,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             ACCESSOR(delta, 4, scalar_t)
         );
 
-        backward_kernel<scalar_t, dqk_m_threads, dv_m_threads><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
+        backward_kernel<scalar_t, attn_n_threads, attn_m_threads, dqk_m_threads, dv_m_threads><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
             ACCESSOR(q, 4, scalar_t),
             ACCESSOR(k, 4, scalar_t),
             ACCESSOR(v, 4, scalar_t),
@@ -1190,9 +1190,9 @@ std::vector<at::Tensor> forward_dispatch(
     auto v_dim = v.size(3);
 
     if (v_dim == 64) {
-        return flash_cosine_sim_attention_forward<4>(q, k, v, mask, attn_bias, scale, causal, need_store_rowsum);
+        return flash_cosine_sim_attention_forward<4, 4, 4>(q, k, v, mask, attn_bias, scale, causal, need_store_rowsum);
     } else if (v_dim == 32) {
-        return flash_cosine_sim_attention_forward<2>(q, k, v, mask, attn_bias, scale, causal, need_store_rowsum);
+        return flash_cosine_sim_attention_forward<4, 4, 2>(q, k, v, mask, attn_bias, scale, causal, need_store_rowsum);
     } else {
         throw std::invalid_argument("value dimension must be either 64 or 43");
     }
@@ -1215,13 +1215,13 @@ std::vector<torch::Tensor> backward_dispatch(
     auto v_dim = v.size(3);
 
     if (k_dim == 64 && v_dim == 64) {
-        return flash_cosine_sim_attention_backward<4, 4>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
+        return flash_cosine_sim_attention_backward<2, 2, 4, 4>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
     } else if (k_dim == 64 && v_dim == 32) {
-        return flash_cosine_sim_attention_backward<4, 2>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
+        return flash_cosine_sim_attention_backward<2, 2, 4, 2>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
     } else if (k_dim == 32 && v_dim == 64) {
-        return flash_cosine_sim_attention_backward<2, 4>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
+        return flash_cosine_sim_attention_backward<2, 2, 2, 4>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
     } else if (k_dim == 32 && v_dim == 32) {
-        return flash_cosine_sim_attention_backward<2, 2>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
+        return flash_cosine_sim_attention_backward<2, 2, 2, 2>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
     } else {
         throw std::invalid_argument("invalid dimensions");
     }
