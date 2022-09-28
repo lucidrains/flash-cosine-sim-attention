@@ -952,7 +952,7 @@ __global__ void forward_kernel(
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
             int attn_col = col + col_tile_offset;
-            int attn_row = row + row_tile_offset;            
+            int attn_row = row + row_tile_offset;
 
             if ((attn_col >= col_seq_len) ||
                 (attn_row >= row_seq_len) ||
@@ -966,6 +966,7 @@ __global__ void forward_kernel(
         });
 
         QK_mma.store_transpose(C_sm);
+
         __syncthreads();
 
         L_acc.add(C_sm, col_tile_offset, col_seq_len);
@@ -1094,7 +1095,7 @@ __global__ void backward_preprocess(
 
 // main backward kernel
 
-template <typename scalar_t, int attn_n_threads, int attn_m_threads, int dqk_m_threads, int dv_m_threads>
+template <typename scalar_t>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -1121,12 +1122,43 @@ __global__ void backward_kernel(
     const int batch_idx = blockIdx.x / head;
     const int head_idx = blockIdx.x % head;
 
-    const int q_seq_len = q.size(2);
-    const int k_seq_len = k.size(2);
-    const int qk_seq_len_diff = k_seq_len - q_seq_len;
+    const int row_seq_len = q.size(2);
+    const int col_seq_len = k.size(2);
+    const int seq_len_diff = col_seq_len - row_seq_len;
 
-    const int k_dim = k.size(3);
-    const int v_dim = v.size(3);
+    const int dim_qk = k.size(3);
+    const int dim_v = v.size(3);
+
+    constexpr int chunk_size = 16;
+
+    // shared memory
+
+    using QK_mma_t  = mma::warp_tile<scalar_t>;
+    using dV_mma_t = mma::warp_tile<scalar_t>;
+
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+    using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+
+    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+
+    using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
+
+    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
+
+    // registers
+
+    QK_mma_t QK_mma;
+    dV_mma_t dv_mma;
+
+    // shared memory
+
+    Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
+    DO_sm_t DO_sm{reinterpret_cast<char*>(_shared_mem)};
+
+    K_sm_t K_sm{Q_sm.next()};
+    V_sm_t V_sm{Q_sm.next()};
+    C_sm_t C_sm{K_sm.next()};
 
     // shortcut accessors
 
@@ -1143,174 +1175,80 @@ __global__ void backward_kernel(
 
     // handle attention bias
 
-    auto attn_bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
+    auto bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
 
     // variables
 
-    scalar_t bias;
-
-    // mma
-
-    mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads> mma;
-    mma_warp_tile<scalar_t, attn_n_threads, dqk_m_threads> dq_mma;
-    mma_warp_tile<scalar_t, attn_m_threads, dqk_m_threads> dk_mma;
-    mma_warp_tile<scalar_t, attn_m_threads, dv_m_threads> dv_mma;
+    float bias;
 
     // tiles
 
-    const int num_col_tiles = cdiv(k_seq_len, mma.M_tile);
-    const int num_row_tiles = cdiv(q_seq_len, mma.N_tile);
+    auto col_tile_size = QK_mma_t::M_tile;
+    auto row_tile_size = QK_mma_t::N_tile;
 
-    const int tile_x = blockIdx.y;
+    int col_tile_offset = blockIdx.y * col_tile_size;
 
-    const int num_row_tiles_per_block = cdiv(num_row_tiles, gridDim.z);
-    const int tile_y_start = blockIdx.z * num_row_tiles_per_block;
-
-    // shared memory
-
-    extern __shared__ char _shared_mem_backward[];
-
-    smem_fragment<scalar_t> sm_q {_shared_mem_backward, mma.N_tile, k_dim};
-    smem_fragment<scalar_t> sm_attn {sm_q.next(), mma.N_tile, mma.M_tile};
-    smem_fragment<scalar_t> sm_k {sm_attn.next(), mma.M_tile, k_dim};
-    smem_fragment<scalar_t> sm_v {sm_k.next(), mma.M_tile, v_dim};
-    smem_fragment<scalar_t> sm_do {sm_v.next(), mma.N_tile, v_dim};
-
-    int col_offset = tile_x * mma.M_tile;
-
-    // load keys and values into shared memory
-
-    sm_k.load_transpose(k_, tile_x, has_mask, mask_, k_seq_len);
-
-    sm_v.load_transpose(v_, tile_x, k_seq_len);
-
-    dk_mma.zero();
+    // zero out accumulators
 
     dv_mma.zero();
 
-    // loop over rows
+    // loop over column tiles
 
-    for (int tile_y = tile_y_start; tile_y < (tile_y_start + num_row_tiles_per_block); tile_y++) {
+    for (int row_tile_offset = 0; row_tile_offset < row_seq_len; row_tile_offset += row_tile_size) {
 
-        int row_offset = tile_y * mma.N_tile;
-
-        if (causal && (col_offset - qk_seq_len_diff) >= (mma.N_tile * (tile_y + 1)))
+        if (causal && ((col_tile_offset - seq_len_diff) >= (row_tile_offset + row_tile_size)))
             continue;
 
-        // load queries and scaled do into shared memories
+        QK_mma.zero();
 
-        sm_q.load_transpose(q_, tile_y, q_seq_len);
-        sm_do.load(do_, tile_y, q_seq_len);
+        // get qk similarity matrix
 
-        __syncthreads();
+        for (int k = 0; k < dim_qk; k += chunk_size) {
+            Q_sm.load_transpose(q_, k, row_tile_offset, 0, row_seq_len);
+            K_sm.load_transpose(k_, k, col_tile_offset, 0, col_seq_len);
+            __syncthreads();
 
-        // accumulate qk similarities
-
-        mma.zero();
-
-        for (int d = 0; d < k_dim; d++) {
-            mma.mma(sm_q, sm_k, d, has_mask);
+            QK_mma.mma(Q_sm, K_sm, 0, 0, chunk_size);
+            __syncthreads();
         }
 
-        // calculate attention
+        // scale and exponentiation, depending on masking or not
 
-        mma.pointwise(tile_y, tile_x, [&](float el, int global_row, int global_col) {
+        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
+            int attn_col = col + col_tile_offset;
+            int attn_row = row + row_tile_offset;
 
-            if (global_row >= q_seq_len ||
-                global_col >= k_seq_len ||
-                causal && (global_row < (global_col - qk_seq_len_diff)))
+            if ((attn_col >= col_seq_len) ||
+                (attn_row >= row_seq_len) ||
+                (causal && ((attn_col - seq_len_diff) > attn_row)) ||
+                (has_mask && !mask_[attn_col]))
                 return 0.f;
 
-            bias = has_attn_bias ? (float) attn_bias_[global_row][global_col] : 0.f;
+            bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return expf((scale * el + bias) - scale);
-
+            return expf(scale * el + bias - scale);
         });
 
-        mma.store(sm_attn.smem);
+        QK_mma.store(C_sm);
 
         __syncthreads();
 
-        // accumulate dv to global mem
+        // aggregate dv with recomputed attention matrix
 
-        for (int d = 0; d < mma.N_tile; d++) {
-            dv_mma.mma(sm_attn, sm_do, d);
+        for (int k = 0; k < row_tile_size; k += chunk_size) {
+            DO_sm.load(do_, 0, row_tile_offset + k, 0, row_seq_len);
+            __syncthreads();
+
+            dv_mma.mma(C_sm, DO_sm, k, 0, chunk_size);
+            __syncthreads();
         }
-
-        __syncthreads();
-
-        // calculate dp
-
-        mma.zero();
-
-        for (int d = 0; d < v_dim; d++) {
-            mma.mma_transpose_a(sm_do, sm_v, d);
-        }
-
-        __syncthreads();
-
-        // calculate dS
-        // just do things manually out in the open, as the operation is not very reusable
-
-        #pragma unroll
-        for (int i = 0; i < mma.N_thread; i++) {
-            int global_row = row_offset + i * mma.N_warp + mma.thread_y;
-
-            scalar_t row_val = delta_[global_row][0];
-
-            #pragma unroll
-            for (int j = 0; j < mma.M_thread; j++) {
-                mma.C_frag[i * mma.M_thread + j] -= row_val;
-                mma.C_frag[i * mma.M_thread + j] *= sm_attn.get((mma.thread_y + i * mma.N_warp) * mma.M_tile + j * mma.M_warp + mma.thread_x);
-            }
-        }
-
-        // store to ds_ if attention bias requires gradients
-
-        if (attn_bias_requires_grad)
-            mma.atomic_add(ds_, col_offset, row_offset, k_seq_len, q_seq_len);
-
-        // scale
-
-        mma.pointwise([&](scalar_t el) {
-            return el * scale;
-        });
-
-        mma.store(sm_attn.smem);
-
-        __syncthreads();
-
-        // calculate dk
-
-        for (int d = 0; d < mma.N_tile; d++) {
-            dk_mma.mma_transpose_b(sm_attn, sm_q, d);
-        }
-
-        __syncthreads();
-
-        // calculate dq
-
-        dq_mma.zero();
-
-        for (int d = 0; d < mma.M_tile; d++) {
-            dq_mma.mma_transpose_ab(sm_attn, sm_k, d);
-        }
-
-        dq_mma.atomic_add(dq_, 0, row_offset, k_dim, q_seq_len);
-
-        __syncthreads();
     }
 
-    if (gridDim.z == 1) {
-        dv_mma.store(dv_, 0, col_offset, v_dim, k_seq_len);
+    dv_mma.store(C_sm);
 
-        dk_mma.store(dk_, 0, col_offset, k_dim, k_seq_len);
+    __syncthreads();
 
-    } else {
-        dv_mma.atomic_add(dv_, 0, col_offset, v_dim, k_seq_len);
-
-        dk_mma.atomic_add(dk_, 0, col_offset, k_dim, k_seq_len);
-    }
+    C_sm.store(dv_, 0, col_tile_offset, 0, col_seq_len);
 }
 
 // forwards c++ function
@@ -1441,25 +1379,15 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             const int N_tile = mma_warp_tile_klass::N_tile;
             const int M_tile = mma_warp_tile_klass::M_tile;
 
-            const int blocks_per_row = 2;
-
             const dim3 backwards_blocks(
                 batch * heads,
-                cdiv(k_seq, mma_warp_tile_klass::M_tile),
-                min(blocks_per_row, cdiv(seq, mma_warp_tile_klass::N_tile))
+                cdiv(k_seq, M_tile)
             );
 
             const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
             const unsigned backwards_preprocess_shared_mem_size = (
                 cdiv(v_dim, 32) + v_dim + 1
-            ) * sizeof(scalar_t);
-
-            const unsigned backwards_shared_mem_size = (
-                (N_tile + M_tile) * k_dim +      // q, k
-                (N_tile + M_tile) * v_dim +      // v, do
-                (N_tile * M_tile) +              // attn
-                 N_tile                          // delta
             ) * sizeof(scalar_t);
 
             backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
@@ -1470,7 +1398,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(delta, 4, scalar_t)
             );
 
-            backward_kernel<scalar_t, 2, 2, 4, 4><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
+            backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
