@@ -228,12 +228,16 @@ struct rowsum_accumulator {
     }
 
     template<typename shared_fragment>
-    __device__ void add(shared_fragment& smem) {
-        if (threadIdx.x < N_tile) {
-            #pragma unroll
-            for (int i = 0; i < M_tile; i++) {
-                acc += smem(threadIdx.x, i);
-            }
+    __device__ void add(shared_fragment& smem, int col_tile_offset, int col_seq_len) {
+        if (threadIdx.x >= N_tile)
+            return;
+
+        #pragma unroll
+        for (int i = 0; i < M_tile; i++) {
+            if ((col_tile_offset + i) >= col_seq_len)
+                continue;
+
+            acc += smem(threadIdx.x, i);
         }
     }
 
@@ -250,10 +254,13 @@ struct rowsum_accumulator {
     }
 
     template<typename accessor>
-    __device__ void store(accessor gmem, int tile_y, int max_y) {
-        if (threadIdx.x < N_tile && (threadIdx.x + tile_y) < max_y) {
-            gmem[threadIdx.x + tile_y] = acc;
-        }
+    __device__ void store(accessor gmem, int row_tile_offset, int row_seq_len) {
+        int row = row_tile_offset + threadIdx.x;
+
+        if (threadIdx.x >= N_tile || row >= row_seq_len)
+            return;
+
+        gmem[row] = acc;
     }
 };
 
@@ -442,14 +449,14 @@ namespace mma {
             for (int i = 0; i < N_thread; i++) {
                 #pragma unroll
                 for (int j = 0; j < C_frag[i].num_elements; j++) {
-                    int col = getWarpCol(j) + warp_x * 16;
-                    int row = getWarpRow(j) + i * 16 + warp_y * 32;
+                    int col = get_warp_col(j) + warp_x * 16;
+                    int row = get_warp_row(j) + i * 16 + warp_y * 32;
                     C_frag[i].x[j] = op(C_frag[i].x[j], col, row);
                 }
             }
         }
 
-        __device__ int getWarpRow(int i) {
+        __device__ int get_warp_row(int i) {
             int tid = threadIdx.x % 32;
             #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
                 return (tid & 3) + ((tid & 4) << 1) + ((tid & 16) >> 2); // half
@@ -459,7 +466,7 @@ namespace mma {
             #endif
         }
 
-        __device__ int getWarpCol(int i) {
+        __device__ int get_warp_col(int i) {
             int tid = threadIdx.x % 32;
             #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
                 return (i & 7) + (tid & 8); // half
@@ -869,9 +876,9 @@ __global__ void forward_kernel(
     const int batch = blockIdx.y;
     const int heads = blockIdx.z;
 
-    const int q_seq_len = Q.size(2);
-    const int k_seq_len = K.size(2);
-    const int qk_seq_len_diff = k_seq_len - q_seq_len;
+    const int row_seq_len = Q.size(2);
+    const int col_seq_len = K.size(2);
+    const int seq_len_diff = col_seq_len - row_seq_len;
 
     const int dim_qk = Q.size(3);
 
@@ -882,6 +889,7 @@ __global__ void forward_kernel(
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
     using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
 
     const int row_tile_offset = blockIdx.x * QK_mma_t::N_tile;
@@ -900,6 +908,7 @@ __global__ void forward_kernel(
 
     Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
     K_sm_t K_sm{Q_sm.next()};
+    V_sm_t V_sm{Q_sm.next()};
     C_sm_t C_sm{K_sm.next()};
 
     out_mma.zero();
@@ -922,8 +931,8 @@ __global__ void forward_kernel(
 
     // loop over column tiles
 
-    for (int col_tile_offset = 0; col_tile_offset < k_seq_len; col_tile_offset += col_tile_size) {
-        if (causal && ((col_tile_offset - qk_seq_len_diff) >= (row_tile_offset + row_tile_size)))
+    for (int col_tile_offset = 0; col_tile_offset < col_seq_len; col_tile_offset += col_tile_size) {
+        if (causal && ((col_tile_offset - seq_len_diff) >= (row_tile_offset + row_tile_size)))
             continue;
 
         QK_mma.zero();
@@ -931,8 +940,8 @@ __global__ void forward_kernel(
         // get qk similarity matrix
 
         for (int k = 0; k < dim_qk; k += chunk_size) {
-            Q_sm.load_transpose(Q_, k, row_tile_offset, 0, q_seq_len);
-            K_sm.load_transpose(K_, k, col_tile_offset, 0, k_seq_len);
+            Q_sm.load_transpose(Q_, k, row_tile_offset, 0, row_seq_len);
+            K_sm.load_transpose(K_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
             QK_mma.mma(Q_sm, K_sm, 0, 0, chunk_size);
@@ -945,9 +954,9 @@ __global__ void forward_kernel(
             int attn_col = col + col_tile_offset;
             int attn_row = row + row_tile_offset;            
 
-            if ((attn_col >= k_seq_len) ||
-                (attn_row >= q_seq_len) ||
-                (causal && ((attn_col - qk_seq_len_diff) > attn_row)) ||
+            if ((attn_col >= col_seq_len) ||
+                (attn_row >= row_seq_len) ||
+                (causal && ((attn_col - seq_len_diff) > attn_row)) ||
                 (has_mask && !mask_[attn_col]))
                 return 0.f;
 
@@ -959,28 +968,28 @@ __global__ void forward_kernel(
         QK_mma.store_transpose(C_sm);
         __syncthreads();
 
-        L_acc.add(C_sm);
+        L_acc.add(C_sm, col_tile_offset, col_seq_len);
 
         // aggregate values with attention matrix
 
         for (int k = 0; k < col_tile_size; k += chunk_size) {
-            K_sm.load(V_, 0, col_tile_offset + k, 0, k_seq_len);
+            V_sm.load(V_, 0, col_tile_offset + k, 0, col_seq_len);
             __syncthreads();
 
-            out_mma.mma(C_sm, K_sm, k, 0, chunk_size);
+            out_mma.mma(C_sm, V_sm, k, 0, chunk_size);
             __syncthreads();
         }
     }
 
     if (need_store_rowsum)
-        L_acc.store(l_, row_tile_offset, q_seq_len);
+        L_acc.store(l_, row_tile_offset, row_seq_len);
 
     L_acc.divide(C_sm.smem, out_mma);
 
     out_mma.store(C_sm);
     __syncthreads();
 
-    C_sm.store(O_, 0, row_tile_offset, 0, q_seq_len);
+    C_sm.store(O_, 0, row_tile_offset, 0, row_seq_len);
 }
 
 // backward kernel
@@ -1079,7 +1088,6 @@ __global__ void backward_preprocess(
         if (dim_idx == 0) {
             delta_[0] = val;
         }
-
     }
 }
 

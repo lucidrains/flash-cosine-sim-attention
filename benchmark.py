@@ -28,7 +28,7 @@ HEADS = 8
 DIM = 64
 CAUSAL = args.causal
 
-TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192, 16384)
+TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096)
 
 TEST_FORWARDS = not args.only_backwards
 TEST_BACKWARDS = not args.only_forwards
