@@ -14,6 +14,12 @@ benchmark_forward: install
 benchmark_backward: install
 	python benchmark.py --only-backwards
 
+benchmark_forward_causal: install
+	python benchmark.py --only-forwards --causal
+
+benchmark_backward_causal: install
+	python benchmark.py --only-backwards --causal
+
 train: install
 	python train.py --use-cuda-kernel
 

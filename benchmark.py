@@ -23,12 +23,12 @@ assert not (args.only_forwards and args.only_backwards)
 
 # constants
 
-BATCH_SIZES = (2, 4, 8)
-HEADS = 4
+BATCH_SIZES = 4
+HEADS = 8
 DIM = 64
 CAUSAL = args.causal
 
-TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192)
+TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192, 16384)
 
 TEST_FORWARDS = not args.only_backwards
 TEST_BACKWARDS = not args.only_forwards
@@ -56,25 +56,30 @@ params = dict((
 
 permutations = list(product(*map(cast_tuple, params.values())))
 
-for batch, heads, dim in permutations:
-    print('-' * 40)
-    print(f'batch: {batch}\theads: {heads}\tdim {dim}\t')
-    print('-' * 40)
+for name, dtype in (('float32', torch.float32), ('float16', torch.float16)):
 
-    for seq in TEST_SEQUENCE_LENGTHS:
-        q = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
-        k = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
-        v = torch.randn(batch, heads, seq, dim).cuda().requires_grad_()
+    if TEST_BACKWARDS and name == 'float16':
+        continue
 
-        fused_time = fused_attention_fn(q, k, v, causal = CAUSAL)
+    for batch, heads, dim in permutations:
+        print('-' * 60)
+        print(f'{name}\t\tbatch: {batch}\theads: {heads}\tdim {dim}\t')
+        print('-' * 60)
 
-        try:
-            baseline_time = attention_fn(q, k, v, causal = CAUSAL)
-        except:
-            torch.cuda.empty_cache()
-            baseline_time = -1
+        for seq in TEST_SEQUENCE_LENGTHS:
+            q = torch.randn(batch, heads, seq, dim, dtype = dtype).cuda().requires_grad_()
+            k = torch.randn(batch, heads, seq, dim, dtype = dtype).cuda().requires_grad_()
+            v = torch.randn(batch, heads, seq, dim, dtype = dtype).cuda().requires_grad_()
 
-        times_slower = (fused_time / baseline_time) if baseline_time != -1 else 0.
-        baseline_time_str = 'oom' if baseline_time == -1 else f"{baseline_time:.2f}ms"
+            fused_time = fused_attention_fn(q, k, v, causal = CAUSAL)
 
-        print(f'seq_len: {seq}\tslower: {times_slower:.2f}x\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time_str}')
+            try:
+                baseline_time = attention_fn(q, k, v, causal = CAUSAL)
+            except:
+                torch.cuda.empty_cache()
+                baseline_time = -1
+
+            times_slower = (fused_time / baseline_time) if baseline_time != -1 else 0.
+            baseline_time_str = 'oom' if baseline_time == -1 else f"{baseline_time:.2f}ms"
+
+            print(f'seq_len: {seq}\tslower: {times_slower:.2f}x\tkernel: {fused_time:.2f}ms\tbaseline: {baseline_time_str}')

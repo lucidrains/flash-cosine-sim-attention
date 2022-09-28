@@ -16,32 +16,36 @@ def allclose(a, b, atol = 1e-4):
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
 @pytest.mark.parametrize('qk_dim_head', [32, 64])
-@pytest.mark.parametrize('v_dim_head', [64, 32])
+@pytest.mark.parametrize('v_dim_head', [64])
+@pytest.mark.parametrize('float16', [False, True])
 def test_output_equal(
     causal,
     mask,
     attn_bias,
     seq_len,
     qk_dim_head,
-    v_dim_head
+    v_dim_head,
+    float16
 ):
-    q = torch.randn(4, 8, seq_len, qk_dim_head).cuda()
-    k = torch.randn(4, 8, seq_len, qk_dim_head).cuda()
-    v = torch.randn(4, 8, seq_len, v_dim_head).cuda()
+    dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
+
+    q = torch.randn(4, 8, seq_len, qk_dim_head, dtype = dtype).cuda()
+    k = torch.randn(4, 8, seq_len, qk_dim_head, dtype = dtype).cuda()
+    v = torch.randn(4, 8, seq_len, v_dim_head, dtype = dtype).cuda()
 
     attn_mask = torch.randint(0, 2, (4, seq_len), dtype = torch.bool).cuda() if mask else None
-    bias = torch.randn(8, seq_len, seq_len).cuda() if attn_bias else None
+    bias = torch.randn(8, seq_len, seq_len, dtype = dtype).cuda() if attn_bias else None
 
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     flash_output = flash_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
 
-    assert allclose(plain_output, flash_output)
+    assert allclose(plain_output, flash_output, atol = atol)
 
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
 @pytest.mark.parametrize('qk_dim_head', [64, 32])
-@pytest.mark.parametrize('v_dim_head', [64, 32])
+@pytest.mark.parametrize('v_dim_head', [64])
 def test_grad_equal(
     causal,
     mask,

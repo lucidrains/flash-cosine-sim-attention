@@ -1,11 +1,13 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cassert>
-#include <functional>
-#include <tuple>
 
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
+
+#include <type_traits>
+#include <ATen/Dispatch.h>
+#include<mma.h>
 
 // error handler
 // from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
@@ -53,6 +55,449 @@ bool divisible_by(int num, int denom) {
 
 __constant__ float NULL_FLOAT_VALUE = -3.14159e5;
 
+// Custom dispatch inspired from
+// https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
+// https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
+// https://github.com/swansontec/map-macro
+
+// Macro utilities:
+#define REMOVE_PAREN_IMPL(...) __VA_ARGS__
+#define REMOVE_PAREN(args) REMOVE_PAREN_IMPL args
+
+#define EVAL0(...) __VA_ARGS__
+#define EVAL1(...) EVAL0(EVAL0(EVAL0(__VA_ARGS__)))
+#define EVAL2(...) EVAL1(EVAL1(EVAL1(__VA_ARGS__)))
+#define EVAL3(...) EVAL2(EVAL2(EVAL2(__VA_ARGS__)))
+#define EVAL4(...) EVAL3(EVAL3(EVAL3(__VA_ARGS__)))
+#define EVAL(...)  EVAL4(EVAL4(EVAL4(__VA_ARGS__)))
+
+#define MAP_END(...)
+#define MAP_OUT
+
+#define MAP_GET_END2() 0, MAP_END
+#define MAP_GET_END1(...) MAP_GET_END2
+#define MAP_GET_END(...) MAP_GET_END1
+#define MAP_NEXT0(test, next, ...) next MAP_OUT
+#define MAP_NEXT1(test, next) MAP_NEXT0(test, next, 0)
+#define MAP_NEXT(test, next)  MAP_NEXT1(MAP_GET_END test, next)
+
+#define MAP0(f, TYPE_NAME, CASE_CODE, x, peek, ...) f(TYPE_NAME, CASE_CODE, x) MAP_NEXT(peek, MAP1)(f, TYPE_NAME, CASE_CODE, peek, __VA_ARGS__)
+#define MAP1(f, TYPE_NAME, CASE_CODE, x, peek, ...) f(TYPE_NAME, CASE_CODE, x) MAP_NEXT(peek, MAP0)(f, TYPE_NAME, CASE_CODE, peek, __VA_ARGS__)
+#define MAP(f, TYPE_NAME, CASE_CODE, ...) EVAL(MAP1(f, TYPE_NAME, CASE_CODE, __VA_ARGS__, ()()(), ()()(), ()()(), 0))
+
+// Type dispatch
+
+#define AT_TYPE_DISPATCH_CASE(TYPE_NAME, CASE_CODE, x)                            \
+    case x: {                                                                     \
+        using TYPE_NAME C10_UNUSED_DISPATCH_CUDA_WORKAROUND =                     \
+          typename c10::impl::ScalarTypeToCPPType<x>::type;                       \
+        REMOVE_PAREN(CASE_CODE)                                                   \
+        break;                                                                    \
+    }
+
+#define AT_TYPE_DISPATCH_SWITCH(TYPE, TYPE_NAME, TYPES, CASE_CODE, DEFAULT_CODE)  \
+  {                                                                               \
+    switch (TYPE) {                                                               \
+        MAP(AT_TYPE_DISPATCH_CASE, TYPE_NAME, CASE_CODE, REMOVE_PAREN(TYPES))     \
+        default: {                                                                \
+            REMOVE_PAREN(DEFAULT_CODE)                                            \
+        }                                                                         \
+    }                                                                             \
+  }
+
+// Value dispatch
+
+#define VALUE_DISPATCH_CASE(VALUE_NAME, CASE_CODE, x)                             \
+    case x: {                                                                     \
+        constexpr const auto VALUE_NAME = x;                                      \
+        REMOVE_PAREN(CASE_CODE)                                                   \
+        break;                                                                    \
+    }
+
+#define VALUE_DISPATCH_SWITCH(VALUE, VALUE_NAME, VALUES, CASE_CODE, DEFAULT_CODE) \
+  {                                                                               \
+    switch (VALUE) {                                                              \
+        MAP(VALUE_DISPATCH_CASE, VALUE_NAME, CASE_CODE, REMOVE_PAREN(VALUES))     \
+        default: {                                                                \
+            REMOVE_PAREN(DEFAULT_CODE)                                            \
+        }                                                                         \
+    }                                                                             \
+  }
+
+namespace mem {
+    template<typename T, int N_tile, int M_tile>
+    struct shared_fragment {
+        static constexpr int N = N_tile;
+        static constexpr int M = M_tile;
+        static constexpr int stride = M + (sizeof(T) == 2 ? 8 : 1);
+        static constexpr int size = N * stride;
+
+        T* smem;
+
+        __device__ shared_fragment(char* shared_base)
+          : smem(reinterpret_cast<T*>(shared_base)) { }
+
+
+        __device__ T& operator()(int x, int y) {
+            return smem[y * stride + x];
+        }
+
+        template<typename accessor>
+        __device__ void load(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+            for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+                int x = i % M;
+                int y = i / M;
+                int gx = x + tile_x;
+                int gy = y + tile_y;
+                int s_ind = y * stride + x;
+
+                if ((max_x > 0  && gx >= max_x) || (max_y > 0 && gy >= max_y)) {
+                    smem[s_ind] = 0.f;
+                    continue;
+                }
+
+                smem[s_ind] = gmem[gy][gx];
+            }
+        }
+
+        template<typename accessor>
+        __device__ void load_transpose(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+            for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+                int x = i % N;
+                int y = i / N;
+                int gx = x + tile_x;
+                int gy = y + tile_y;
+                int s_ind = x * stride + y;
+
+                if ((max_x > 0  && gx >= max_x) || (max_y > 0 && gy >= max_y)) {
+                    smem[s_ind] = 0.f;
+                    continue;
+                }
+
+                smem[s_ind] = gmem[gy][gx];
+            }
+        }
+
+        template<typename accessor>
+        __device__ void store(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+            for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
+                int x = i % M;
+                int y = i / M;
+                int gx = x + tile_x;
+                int gy = y + tile_y;
+                int s_ind = y * stride + x;
+
+                if ((max_x > 0  && gx >= max_x) || (max_y > 0 && gy >= max_y))
+                    continue;
+
+                gmem[gy][gx] = smem[s_ind];
+            }
+        }
+
+        template<typename accessor>
+        __device__ void load(accessor gmem, int tile_x, int tile_y) {
+            load(gmem, tile_x, tile_y, 0, 0);
+        }
+
+        template<typename accessor>
+        __device__ void store(accessor gmem, int tile_x, int tile_y) {
+            store(gmem, tile_x, tile_y, 0, 0);
+        }
+
+        template<typename accessor>
+        __device__ void load_transpose(accessor gmem, int tile_x, int tile_y) {
+            load_transpose(gmem, tile_x, tile_y, 0, 0);
+        }
+
+        __device__ char* next() {
+            return reinterpret_cast<char*>(smem + size);
+        }
+    };
+} // namespace mem
+
+template <typename scalar_t, typename warp_tile_t>
+struct rowsum_accumulator {
+    static constexpr int N_tile = warp_tile_t::N_tile;
+    static constexpr int M_tile = warp_tile_t::M_tile;
+    static constexpr float EPS = 1e-10;
+
+    float acc;
+
+    __device__ void zero() {
+        acc = 0;
+    }
+
+    template<typename shared_fragment>
+    __device__ void add(shared_fragment& smem) {
+        if (threadIdx.x < N_tile) {
+            #pragma unroll
+            for (int i = 0; i < M_tile; i++) {
+                acc += smem(threadIdx.x, i);
+            }
+        }
+    }
+
+    __device__ void divide(scalar_t* smem, warp_tile_t& mma) {
+        if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, EPS);
+
+        __syncthreads();
+
+        mma.pointwise([&](scalar_t el, int, int y) {
+            return el * smem[y];
+        });
+
+        __syncthreads();
+    }
+
+    template<typename accessor>
+    __device__ void store(accessor gmem, int tile_y, int max_y) {
+        if (threadIdx.x < N_tile && (threadIdx.x + tile_y) < max_y) {
+            gmem[threadIdx.x + tile_y] = acc;
+        }
+    }
+};
+
+namespace mma {
+    template<typename scalar_t>
+    struct warp_tile {
+        // How much data is processed by a single thread:
+        static constexpr int N_thread = 4;
+        static constexpr int M_thread = 4;
+
+        // Thread layout within a warp:
+        static constexpr int N_warp = 8;
+        static constexpr int M_warp = 4;
+        static_assert(N_warp * M_warp == 32);
+
+        // Warp layout within a block:
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+        static_assert(N_block * M_block * N_warp * M_warp == 256); // blockDim.x
+
+        // Dimensions of the tile, in threads:
+        static constexpr int N_tile = N_warp * N_block * N_thread;
+        static constexpr int M_tile = M_warp * M_block * M_thread;
+        static constexpr int K_tile = 1;
+
+        // Registers:
+        float C_frag[N_thread * M_thread]; // N x M fragment
+
+        int warp_x;   // x offset of the warp within the block tile
+        int warp_y;   // y offset of the warp within the block tile
+        int thread_x; // x offset of the thread within the warp tile
+        int thread_y; // y offset of the thread within the warp tile
+
+        __device__ warp_tile() {
+            int warp_id = threadIdx.x / 32;
+            warp_x = (warp_id % M_block);
+            warp_y = (warp_id / M_block);
+
+            int lane_id = threadIdx.x % 32;
+            thread_x = warp_x * M_warp * M_thread + lane_id % M_warp;
+            thread_y = warp_y * N_warp * N_thread + lane_id / M_warp;
+        }
+
+        // Initialize C to all zeros
+        __device__ void zero() {
+            #pragma unroll
+            for (int i = 0; i < N_thread * M_thread; i++) {
+                C_frag[i] = 0.f;
+            }
+        }
+
+        // Performs C = A * B + C
+        template<typename fragA, typename fragB>
+        __device__ void mma(fragA& A_sm, fragB& B_sm, int ka0, int kb0, int D) {
+            float A_frag[N_thread]; // N x 1 fragment
+            float B_frag[M_thread]; // 1 x M fragment
+
+            for (int k = 0; k < D; k += K_tile) {
+                // Load a N x 1 fragment of A from shared memory to registers:
+                #pragma unroll
+                for (int i = 0; i < N_thread; i++) {
+                    A_frag[i] = A_sm(i * N_warp + thread_y, ka0 + k);
+                }
+
+                // Load a 1 x M fragment of B from shared memory to registers:
+                #pragma unroll
+                for (int i = 0; i < M_thread; i++) {
+                    B_frag[i] = B_sm(i * M_warp + thread_x, kb0 + k);
+                }
+
+                // Compute:
+                #pragma unroll
+                for (int i = 0; i < N_thread; i++) {
+                    #pragma unroll
+                    for (int j = 0; j < M_thread ; j++) {
+                        C_frag[i * M_thread + j] += A_frag[i] * B_frag[j];
+                    }
+                }
+            }
+        }
+
+        // Perform a pointwise operation, specified by the given lambda, on C
+        template<typename F>
+        __device__ void pointwise(F&& op) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y;
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    int col = j * M_warp  + thread_x;
+                    C_frag[i * M_thread + j] = op(C_frag[i * M_thread + j], col, row);
+                }
+            }
+        }
+
+        // Copy C from registers to shared memory
+        template<typename shared_fragment>
+        __device__ void store(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    C_sm(j * M_warp + thread_x, i * N_warp + thread_y) = C_frag[i * M_thread + j];
+                }
+            }
+        }
+
+        template<typename shared_fragment>
+        __device__ void store_transpose(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    C_sm(i * N_warp + thread_y, j * M_warp + thread_x) = C_frag[i * M_thread + j];
+                }
+            }
+        }
+    };
+
+    using namespace nvcuda;
+    template<>
+    struct warp_tile<c10::Half> {
+        // How much data is processed by a single thread:
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 1;
+
+        // Thread layout within a warp:
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        // Warp layout within a block:
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        // Dimensions of the tile, in threads:
+        static constexpr int N_tile = N_warp * N_block * N_thread;
+        static constexpr int M_tile = M_warp * M_block * M_thread;
+        static constexpr int K_tile = 16;
+
+        // Registers:
+        wmma::fragment<wmma::accumulator, 16, 16, 16, half> C_frag[N_thread * M_thread];
+
+        int warp_x;   // x offset of the warp within the block tile
+        int warp_y;   // y offset of the warp within the block tile
+
+        __device__ warp_tile() {
+            int warp_id = threadIdx.x / 32;
+            warp_x = (warp_id % M_block);
+            warp_y = (warp_id / M_block);
+        }
+
+        // Initialize C to all zeros
+        __device__ void zero() {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                wmma::fill_fragment(C_frag[i], __float2half(0.f));
+            }
+        }
+
+        // Performs C = A * B + C
+        template<typename fragA, typename fragB>
+        __device__ void mma(fragA& A_sm, fragB& B_sm, int ka0, int kb0, int D) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> A_frag;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> B_frag;
+
+            for (int k = 0; k < D; k += K_tile) {
+                // Load a 1 x M fragment of B from shared memory to registers:
+                wmma::load_matrix_sync(B_frag, reinterpret_cast<const half*>(&B_sm(warp_x * M_warp, kb0 + k)), B_sm.stride);
+
+                #pragma unroll
+                for (int i = 0; i < N_thread; i++) {
+                    // Load a N x 1 fragment of A from shared memory to registers:
+                    int y = (warp_y * N_thread + i) * N_warp;
+                    wmma::load_matrix_sync(A_frag, reinterpret_cast<const half*>(&A_sm(y, ka0 + k)), A_sm.stride);
+
+                    // Compute:
+                    wmma::mma_sync(C_frag[i], A_frag, B_frag, C_frag[i]);
+                }
+            }
+        }
+
+        // Perform a pointwise operation, specified by the given lambda, on C
+        template<typename F>
+        __device__ void pointwise(F&& op) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < C_frag[i].num_elements; j++) {
+                    int col = getWarpCol(j) + warp_x * 16;
+                    int row = getWarpRow(j) + i * 16 + warp_y * 32;
+                    C_frag[i].x[j] = op(C_frag[i].x[j], col, row);
+                }
+            }
+        }
+
+        __device__ int getWarpRow(int i) {
+            int tid = threadIdx.x % 32;
+            #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
+                return (tid & 3) + ((tid & 4) << 1) + ((tid & 16) >> 2); // half
+                //return (tid & 16) / 4 + 2 * (tid & 4) + (tid & 1) + (i & 2); // float
+            #else
+                return (i & 2) * 4 + tid / 4;
+            #endif
+        }
+
+        __device__ int getWarpCol(int i) {
+            int tid = threadIdx.x % 32;
+            #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
+                return (i & 7) + (tid & 8); // half
+                //return (tid & 10) + (i & 5); // float
+            #else
+                return (tid % 4) * 2 + i % 2 + (i & 4) * 2;
+            #endif
+        }
+
+        // Copy C from registers to shared memory
+        template<typename shared_fragment>
+        __device__ void store(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int y = (warp_y * N_thread + i) * N_warp;
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    int x = (warp_x * M_thread + j) * M_warp;
+                    wmma::store_matrix_sync(reinterpret_cast<half*>(&C_sm(x, y)), C_frag[i * M_thread + j], shared_fragment::stride, wmma::mem_row_major);
+                }
+            }
+        }
+
+        template<typename shared_fragment>
+        __device__ void store_transpose(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int y = (warp_y * N_thread + i) * N_warp;
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    int x = (warp_x * M_thread + j) * M_warp;
+                    wmma::store_matrix_sync(reinterpret_cast<half*>(&C_sm(y, x)), C_frag[i * M_thread + j], shared_fragment::stride, wmma::mem_col_major);
+                }
+            }
+        }
+    };
+}
+
 // shared memory fragment
 
 template<typename T>
@@ -60,10 +505,13 @@ struct smem_fragment {
     T* smem;
     int N;
     int M;
+    int size;
     bool transposed = false;
 
     __device__ smem_fragment(char* shared_base, int N, int M)
-      : smem(reinterpret_cast<T*>(shared_base)), N(N), M(M) { }
+      : smem(reinterpret_cast<T*>(shared_base)), N(N), M(M) {
+        size = N * M;
+    }
 
     __device__ void load(const T* gmem) {
         for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
@@ -158,12 +606,8 @@ struct smem_fragment {
         }
     }
 
-    __device__ unsigned size() {
-        return N * M;
-    }
-
     __device__ char* next() {
-        return reinterpret_cast<char*>(smem + size());
+        return reinterpret_cast<char*>(smem + size);
     }
 };
 
@@ -402,163 +846,15 @@ struct mma_warp_tile {
     }
 };
 
-template<typename scalar_t, int n_thread, int m_thread>
-struct out_mma_warp_tile {
-    // How much data is processed by a single thread:
-    static constexpr int N_thread = n_thread;
-    static constexpr int M_thread = m_thread;
-
-    // Thread layout within a warp:
-    static constexpr int N_warp = 8;
-    static constexpr int M_warp = 4;
-    static_assert(N_warp * M_warp == 32);
-
-    // Warp layout within a block:
-    static constexpr int N_block = 2;
-    static constexpr int M_block = 4;
-    static_assert(N_block * M_block * N_warp * M_warp == 256); // blockDim.x
-
-    // Dimensions of the tile, in threads:
-    static constexpr int N_tile = N_warp * N_block * N_thread;
-    static constexpr int M_tile = M_warp * M_block * M_thread;
-
-    static constexpr float EPS = 1e-10;
-
-    float divisor;
-
-    // Registers:
-    float A_frag[N_thread];            // N x 1 fragment
-    float B_frag[M_thread];            // 1 x M fragment
-    float L_frag[N_thread];            // N x 1 fragment
-    float C_frag[N_thread * M_thread]; // N x M fragment
-
-    int warp_x;   // x offset of the warp within the block tile
-    int warp_y;   // y offset of the warp within the block tile
-    int thread_x; // x offset of the thread within the warp tile
-    int thread_y; // y offset of the thread within the warp tile
-
-    __device__ out_mma_warp_tile(float divisor) : divisor(divisor) {
-        int warp_id = threadIdx.x / 32;
-        warp_x = (warp_id % M_block);
-        warp_y = (warp_id / M_block);
-
-        int lane_id = threadIdx.x & 31;
-        thread_x = warp_x * M_warp * M_thread + lane_id % M_warp;
-        thread_y = warp_y * N_warp * N_thread + lane_id / M_warp;
-    }
-
-    // Initialize C to all zeros
-    __device__ void zero() {
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            L_frag[i] = 0.f;
-        }
-
-        #pragma unroll
-        for (int i = 0; i < N_thread * M_thread; i++) {
-            C_frag[i] = 0.f;
-        }
-    }
-
-    // Performs C = A * B + C
-    __device__ void mma(
-        smem_fragment<scalar_t> A_sm,
-        smem_fragment<scalar_t> B_sm,
-        int k
-    ) {
-        // Load a N x 1 fragment of A from shared memory to registers:
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            A_frag[i] = A_sm.get(i * N_warp + thread_y + k * N_tile);
-        }
-
-        // Load a 1 x M fragment of B from shared memory to registers:
-        #pragma unroll
-        for (int i = 0; i < M_thread; i++) {
-            B_frag[i] = B_sm.get(i * M_warp + thread_x + k * M_tile);
-        }
-
-        // Compute:
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            L_frag[i] += A_frag[i];
-
-            #pragma unroll
-            for (int j = 0; j < M_thread ; j++) {
-                C_frag[i * M_thread + j] += A_frag[i] * B_frag[j] / divisor;
-            }
-        }
-    }
-
-    // Copy C from registers to shared memory
-    __device__ void store(scalar_t* C_sm_ptr) {
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            float inv_rowsum = 1.f / max(L_frag[i], EPS);
-
-            #pragma unroll
-            for (int j = 0; j < M_thread ; j++) {
-                C_sm_ptr[(thread_y + i * N_warp) * M_tile + j * M_warp + thread_x]
-                  = C_frag[i * M_thread + j] * inv_rowsum;
-            }
-        }
-    }
-
-    template<typename accessor>
-    __device__ void store(accessor gmem, int tile_y, int max_y) {
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            float inv_rowsum = divisor / max(L_frag[i], EPS);
-
-            #pragma unroll
-            for (int j = 0; j < M_thread ; j++) {
-                int gmem_y = thread_y + i * N_warp + tile_y * N_tile;
-                int gmem_x = thread_x + j * M_warp;
-
-                if (gmem_y >= max_y)
-                    continue;
-
-                gmem[gmem_y][gmem_x] = C_frag[i * M_thread + j] * inv_rowsum;
-            }
-        }
-    }
-
-    template<typename accessor>
-    __device__ void store_rowsum(accessor gmem, int tile_y, int max_y) {
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            int gmem_idx = tile_y * N_tile + i * N_warp + thread_y;
-
-            if (gmem_idx >= max_y)
-                continue;
-
-            gmem[gmem_idx] = L_frag[i];
-        }
-    }
-
-    __device__ void store_transpose(scalar_t* C_sm_ptr) {
-        #pragma unroll
-        for (int i = 0; i < N_thread; i++) {
-            float inv_rowsum = 1.f / max(L_frag[i], EPS);
-
-            #pragma unroll
-            for (int j = 0; j < M_thread ; j++) {
-                C_sm_ptr[thread_y + i * N_warp + (j * M_warp + thread_x) * N_tile]
-                    = C_frag[i * M_thread + j] * inv_rowsum;
-            }
-        }
-    }
-};
-
 // forward kernel
 
-template<typename scalar_t, int attn_n_threads, int attn_m_threads, int out_m_threads>
+template <typename scalar_t>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> Q,
     const PackedAccessor<scalar_t, 4> K,
     const PackedAccessor<scalar_t, 4> V,
           PackedAccessor<scalar_t, 4> O,
-          PackedAccessor<scalar_t, 3> L,
+          PackedAccessor<scalar_t, 3> l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
     const float scale,
@@ -568,101 +864,123 @@ __global__ void forward_kernel(
     const bool need_store_rowsum
 ) {
 
+    // dimensions
+
+    const int batch = blockIdx.y;
+    const int heads = blockIdx.z;
+
     const int q_seq_len = Q.size(2);
     const int k_seq_len = K.size(2);
-    const int qk_seq_len_diff = k_seq_len - q_seq_len;  // for calculating causality when query and key lengths differ
+    const int qk_seq_len_diff = k_seq_len - q_seq_len;
 
-    const int k_dim = Q.size(3);
-    const int v_dim = V.size(3);
+    const int dim_qk = Q.size(3);
 
-    const int batch = blockIdx.y / Q.size(1);
-    const int heads = blockIdx.y % Q.size(1);
+    constexpr int chunk_size = 16;
 
-    // shortcut accessor
+    using QK_mma_t  = mma::warp_tile<scalar_t>;
+    using out_mma_t = mma::warp_tile<scalar_t>;
 
-    auto Q_ = Q[batch][heads];
-    auto K_ = K[batch][heads];
-    auto V_ = V[batch][heads];
-    auto O_ = O[batch][heads];
-    auto L_ = L[batch][heads];
-    auto attn_bias_ = attn_bias[heads];
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
+    using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
 
-    // mma
+    const int row_tile_offset = blockIdx.x * QK_mma_t::N_tile;
 
-    mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads> QK_mma;
-    out_mma_warp_tile<scalar_t, attn_m_threads, out_m_threads> out_mma {(float) k_seq_len};
+    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
 
-    // tiles
+    float bias;
 
-    const int num_col_tiles = cdiv(k_seq_len, QK_mma.M_tile);
-    const int tile_y = blockIdx.x;
+    // registers
+
+    QK_mma_t  QK_mma;
+    out_mma_t out_mma;
+    rowsum_accumulator<scalar_t, QK_mma_t> L_acc;
 
     // shared memory
 
-    extern __shared__ char _shared_mem[];
-
-    smem_fragment<scalar_t> Q_sm{_shared_mem, QK_mma.N_tile, k_dim};
-    smem_fragment<scalar_t> A_sm{Q_sm.next(), QK_mma.N_tile, QK_mma.M_tile};
-    smem_fragment<scalar_t> K_sm{A_sm.next(), QK_mma.M_tile, k_dim};
-    smem_fragment<scalar_t> V_sm{A_sm.next(), QK_mma.M_tile, v_dim};
-
-    // helper variables
-
-    scalar_t bias;
-
-    // start loop
+    Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
+    K_sm_t K_sm{Q_sm.next()};
+    C_sm_t C_sm{K_sm.next()};
 
     out_mma.zero();
+    L_acc.zero();
 
-    Q_sm.load_transpose(Q_, tile_y, q_seq_len);
+    // shortcut accessors
 
-    for (int tile_x = 0; tile_x < num_col_tiles; tile_x++) {
-        if (causal && (QK_mma.M_tile * tile_x - qk_seq_len_diff) >= (QK_mma.N_tile * (tile_y + 1)))
+    auto Q_ = Q[batch][heads];
+    auto K_ = K[batch][heads];
+    auto l_ = l[batch][heads];
+    auto V_ = V[batch][heads];
+    auto O_ = O[batch][heads];
+    auto mask_ = mask[batch];
+    auto bias_ = attn_bias[heads];
+
+    // renamed vars
+
+    auto col_tile_size = QK_mma_t::M_tile;
+    auto row_tile_size = QK_mma_t::N_tile;
+
+    // loop over column tiles
+
+    for (int col_tile_offset = 0; col_tile_offset < k_seq_len; col_tile_offset += col_tile_size) {
+        if (causal && ((col_tile_offset - qk_seq_len_diff) >= (row_tile_offset + row_tile_size)))
             continue;
-
-        K_sm.load_transpose(K_, tile_x, has_mask, mask[batch], k_seq_len);
-
-        __syncthreads();
 
         QK_mma.zero();
 
-        for (int d = 0; d < k_dim; d++) {
-            QK_mma.mma(Q_sm, K_sm, d, has_mask);
+        // get qk similarity matrix
+
+        for (int k = 0; k < dim_qk; k += chunk_size) {
+            Q_sm.load_transpose(Q_, k, row_tile_offset, 0, q_seq_len);
+            K_sm.load_transpose(K_, k, col_tile_offset, 0, k_seq_len);
+            __syncthreads();
+
+            QK_mma.mma(Q_sm, K_sm, 0, 0, chunk_size);
+            __syncthreads();
         }
 
-        QK_mma.pointwise(tile_y, tile_x, [&](scalar_t el, int global_row, int global_col) {
+        // scale and exponentiation, depending on masking or not
 
-            if (global_row >= q_seq_len ||
-                global_col >= k_seq_len ||
-                causal && (global_row < (global_col - qk_seq_len_diff)))
+        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
+            int attn_col = col + col_tile_offset;
+            int attn_row = row + row_tile_offset;            
+
+            if ((attn_col >= k_seq_len) ||
+                (attn_row >= q_seq_len) ||
+                (causal && ((attn_col - qk_seq_len_diff) > attn_row)) ||
+                (has_mask && !mask_[attn_col]))
                 return 0.f;
 
-            bias = has_attn_bias ? attn_bias_[global_row][global_col] : (scalar_t) 0.f;
+            bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return __expf((scale * el + bias) - scale); 
+            return expf(scale * el + bias - scale); 
         });
 
-        QK_mma.store_transpose(A_sm.smem);
-
+        QK_mma.store_transpose(C_sm);
         __syncthreads();
 
-        V_sm.load(V_, tile_x, k_seq_len);
+        L_acc.add(C_sm);
 
-        __syncthreads();
+        // aggregate values with attention matrix
 
-        for (int d = 0; d < QK_mma.M_tile; d++) {
-            out_mma.mma(A_sm, V_sm, d);
+        for (int k = 0; k < col_tile_size; k += chunk_size) {
+            K_sm.load(V_, 0, col_tile_offset + k, 0, k_seq_len);
+            __syncthreads();
+
+            out_mma.mma(C_sm, K_sm, k, 0, chunk_size);
+            __syncthreads();
         }
-
-        __syncthreads();
     }
 
-    out_mma.store(O_, tile_y, q_seq_len);
+    if (need_store_rowsum)
+        L_acc.store(l_, row_tile_offset, q_seq_len);
 
-    if (!need_store_rowsum)
-        return;
+    L_acc.divide(C_sm.smem, out_mma);
 
-    out_mma.store_rowsum(L_, tile_y, q_seq_len);
+    out_mma.store(C_sm);
+    __syncthreads();
+
+    C_sm.store(O_, 0, row_tile_offset, 0, q_seq_len);
 }
 
 // backward kernel
@@ -988,7 +1306,6 @@ __global__ void backward_kernel(
 
 // forwards c++ function
 
-template<int attn_n_threads, int attn_m_threads, int out_m_threads>
 std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor Q,
     torch::Tensor K,
@@ -1014,40 +1331,39 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     auto O = at::empty({batch, heads, q_seq_len, v_dim}, options);
     auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options);
 
-    const dim3 threads_per_block(256);
-
     const int max_feature_dimension = max(k_dim, v_dim);
 
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(Q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
+    const dim3 threads_per_block(256);
 
-        using mma_warp_tile_klass = mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads>;
+    AT_TYPE_DISPATCH_SWITCH(Q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+        VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
 
-        const dim3 blocks(cdiv(q_seq_len, mma_warp_tile_klass::N_tile), batch * heads);
+            const dim3 blocks(
+                cdiv(q_seq_len, mma::warp_tile<scalar_t>::N_tile),
+                batch,
+                heads
+            );
 
-        const unsigned shared_mem_size = (
-            mma_warp_tile_klass::N_tile * max_feature_dimension +
-            mma_warp_tile_klass::M_tile * max_feature_dimension +
-            mma_warp_tile_klass::N_tile * mma_warp_tile_klass::M_tile
-        ) * sizeof(scalar_t);
+            forward_kernel<scalar_t><<<blocks, threads_per_block>>>(
+                ACCESSOR(Q, 4, scalar_t),
+                ACCESSOR(K, 4, scalar_t),
+                ACCESSOR(V, 4, scalar_t),
+                ACCESSOR(O, 4, scalar_t),
+                ACCESSOR(L, 3, scalar_t),
+                ACCESSOR(mask, 2, bool),
+                ACCESSOR(attn_bias, 3, scalar_t),
+                scale,
+                causal,
+                has_mask,
+                has_attn_bias,
+                need_store_rowsum
+            );
 
-        forward_kernel<scalar_t, attn_n_threads, attn_m_threads, out_m_threads><<<blocks, threads_per_block, shared_mem_size>>>(
-            ACCESSOR(Q, 4, scalar_t),
-            ACCESSOR(K, 4, scalar_t),
-            ACCESSOR(V, 4, scalar_t),
-            ACCESSOR(O, 4, scalar_t),
-            ACCESSOR(L, 3, scalar_t),
-            ACCESSOR(mask, 2, bool),
-            ACCESSOR(attn_bias, 3, scalar_t),
-            scale,
-            causal,
-            has_mask,
-            has_attn_bias,
-            need_store_rowsum
-        );
-    }));
+        ), ())
+    ), ())
 
     // handle error
 
@@ -1104,7 +1420,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // setup backwards preprocess call
 
     const dim3 backwards_preprocess_threads_per_block(next_multiple_of(v_dim, 32));
-
 
     // setup backwards call
 
@@ -1175,29 +1490,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     return {dq, dk, dv, db};
 }
 
-// dispatch functions
-
-std::vector<at::Tensor> forward_dispatch(
-    torch::Tensor q,
-    torch::Tensor k,
-    torch::Tensor v,
-    torch::Tensor mask,
-    torch::Tensor attn_bias,
-    float scale,
-    bool causal,
-    bool need_store_rowsum
-) {
-    auto v_dim = v.size(3);
-
-    if (v_dim == 64) {
-        return flash_cosine_sim_attention_forward<4, 4, 4>(q, k, v, mask, attn_bias, scale, causal, need_store_rowsum);
-    } else if (v_dim == 32) {
-        return flash_cosine_sim_attention_forward<4, 4, 2>(q, k, v, mask, attn_bias, scale, causal, need_store_rowsum);
-    } else {
-        throw std::invalid_argument("value dimension must be either 64 or 43");
-    }
-}
-
 std::vector<torch::Tensor> backward_dispatch(
     torch::Tensor d_out,
     torch::Tensor o,
@@ -1230,6 +1522,6 @@ std::vector<torch::Tensor> backward_dispatch(
 // bind
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward", &forward_dispatch, "Flash Cosine-Sim Attention Forward");
+    m.def("forward", &flash_cosine_sim_attention_forward, "Flash Cosine-Sim Attention Forward");
     m.def("backward", &backward_dispatch, "Flash Cosine-Sim Attention Backward");
 }
