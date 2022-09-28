@@ -987,6 +987,7 @@ __global__ void forward_kernel(
     L_acc.divide(C_sm.smem, out_mma);
 
     out_mma.store(C_sm);
+
     __syncthreads();
 
     C_sm.store(O_, 0, row_tile_offset, 0, row_seq_len);
@@ -1384,7 +1385,6 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
 // backwards c++ function
 
-template<int attn_n_threads, int attn_m_threads, int dqk_m_threads, int dv_m_threads>
 std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
@@ -1433,61 +1433,64 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const dim3 backwards_threads_per_block(256);
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "forward_cosine_sim_attention_backward", ([&] {
+    AT_TYPE_DISPATCH_SWITCH(q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+        VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
 
-        using mma_warp_tile_klass = mma_warp_tile<scalar_t, attn_n_threads, attn_m_threads>;
+            using mma_warp_tile_klass = mma_warp_tile<scalar_t, 2, 2>;
 
-        const int N_tile = mma_warp_tile_klass::N_tile;
-        const int M_tile = mma_warp_tile_klass::M_tile;
+            const int N_tile = mma_warp_tile_klass::N_tile;
+            const int M_tile = mma_warp_tile_klass::M_tile;
 
-        const int blocks_per_row = 2;
+            const int blocks_per_row = 2;
 
-        const dim3 backwards_blocks(
-            batch * heads,
-            cdiv(k_seq, mma_warp_tile_klass::M_tile),
-            min(blocks_per_row, cdiv(seq, mma_warp_tile_klass::N_tile))
-        );
+            const dim3 backwards_blocks(
+                batch * heads,
+                cdiv(k_seq, mma_warp_tile_klass::M_tile),
+                min(blocks_per_row, cdiv(seq, mma_warp_tile_klass::N_tile))
+            );
 
-        const dim3 backwards_preprocess_blocks(batch * heads, seq);
+            const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
-        const unsigned backwards_preprocess_shared_mem_size = (
-            cdiv(v_dim, 32) + v_dim + 1
-        ) * sizeof(scalar_t);
+            const unsigned backwards_preprocess_shared_mem_size = (
+                cdiv(v_dim, 32) + v_dim + 1
+            ) * sizeof(scalar_t);
 
-        const unsigned backwards_shared_mem_size = (
-            (N_tile + M_tile) * k_dim +      // q, k
-            (N_tile + M_tile) * v_dim +      // v, do
-            (N_tile * M_tile) +              // attn
-             N_tile                          // delta
-        ) * sizeof(scalar_t);
+            const unsigned backwards_shared_mem_size = (
+                (N_tile + M_tile) * k_dim +      // q, k
+                (N_tile + M_tile) * v_dim +      // v, do
+                (N_tile * M_tile) +              // attn
+                 N_tile                          // delta
+            ) * sizeof(scalar_t);
 
-        backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
-            ACCESSOR(d_out, 4, scalar_t),
-            ACCESSOR(o, 4, scalar_t),
-            ACCESSOR(l, 3, scalar_t),
-            ACCESSOR(d_out_scaled, 4, scalar_t),
-            ACCESSOR(delta, 4, scalar_t)
-        );
+            backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
+                ACCESSOR(d_out, 4, scalar_t),
+                ACCESSOR(o, 4, scalar_t),
+                ACCESSOR(l, 3, scalar_t),
+                ACCESSOR(d_out_scaled, 4, scalar_t),
+                ACCESSOR(delta, 4, scalar_t)
+            );
 
-        backward_kernel<scalar_t, attn_n_threads, attn_m_threads, dqk_m_threads, dv_m_threads><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
-            ACCESSOR(q, 4, scalar_t),
-            ACCESSOR(k, 4, scalar_t),
-            ACCESSOR(v, 4, scalar_t),
-            ACCESSOR(mask, 2, bool),
-            ACCESSOR(attn_bias, 3, scalar_t),
-            ACCESSOR(dq, 4, scalar_t),
-            ACCESSOR(dk, 4, scalar_t),
-            ACCESSOR(dv, 4, scalar_t),
-            ACCESSOR(db, 3, scalar_t),
-            ACCESSOR(d_out_scaled, 4, scalar_t),
-            ACCESSOR(delta, 4, scalar_t),
-            scale,
-            causal,
-            has_mask,
-            has_attn_bias,
-            attn_bias_requires_grad
-        );
-    }));
+            backward_kernel<scalar_t, 2, 2, 4, 4><<<backwards_blocks, backwards_threads_per_block, backwards_shared_mem_size>>>(
+                ACCESSOR(q, 4, scalar_t),
+                ACCESSOR(k, 4, scalar_t),
+                ACCESSOR(v, 4, scalar_t),
+                ACCESSOR(mask, 2, bool),
+                ACCESSOR(attn_bias, 3, scalar_t),
+                ACCESSOR(dq, 4, scalar_t),
+                ACCESSOR(dk, 4, scalar_t),
+                ACCESSOR(dv, 4, scalar_t),
+                ACCESSOR(db, 3, scalar_t),
+                ACCESSOR(d_out_scaled, 4, scalar_t),
+                ACCESSOR(delta, 4, scalar_t),
+                scale,
+                causal,
+                has_mask,
+                has_attn_bias,
+                attn_bias_requires_grad
+            );
+
+        ), ())
+    ), ())
 
     cudaDeviceSynchronize();
 
@@ -1498,38 +1501,9 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     return {dq, dk, dv, db};
 }
 
-std::vector<torch::Tensor> backward_dispatch(
-    torch::Tensor d_out,
-    torch::Tensor o,
-    torch::Tensor l,
-    torch::Tensor q,
-    torch::Tensor k,
-    torch::Tensor v,
-    torch::Tensor mask,
-    torch::Tensor attn_bias,
-    float scale,
-    bool causal,
-    bool attn_bias_requires_grad
-) {
-    auto k_dim = k.size(3);
-    auto v_dim = v.size(3);
-
-    if (k_dim == 64 && v_dim == 64) {
-        return flash_cosine_sim_attention_backward<2, 2, 4, 4>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
-    } else if (k_dim == 64 && v_dim == 32) {
-        return flash_cosine_sim_attention_backward<2, 2, 4, 2>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
-    } else if (k_dim == 32 && v_dim == 64) {
-        return flash_cosine_sim_attention_backward<2, 2, 2, 4>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
-    } else if (k_dim == 32 && v_dim == 32) {
-        return flash_cosine_sim_attention_backward<2, 2, 2, 2>(d_out, o, l, q, k, v, mask, attn_bias, scale, causal, attn_bias_requires_grad);
-    } else {
-        throw std::invalid_argument("invalid dimensions");
-    }
-}
-
 // bind
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward", &flash_cosine_sim_attention_forward, "Flash Cosine-Sim Attention Forward");
-    m.def("backward", &backward_dispatch, "Flash Cosine-Sim Attention Backward");
+    m.def("backward", &flash_cosine_sim_attention_backward, "Flash Cosine-Sim Attention Backward");
 }
