@@ -1135,6 +1135,7 @@ __global__ void backward_kernel(
 
     using QK_mma_t  = mma::warp_tile<scalar_t>;
     using dV_mma_t = mma::warp_tile<scalar_t>;
+    using dK_mma_t = mma::warp_tile<scalar_t>;
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
     using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
@@ -1151,6 +1152,7 @@ __global__ void backward_kernel(
 
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
+    dK_mma_t dk_mma;
 
     // shared memory
 
@@ -1193,6 +1195,7 @@ __global__ void backward_kernel(
     // zero out accumulators
 
     dv_mma.zero();
+    dk_mma.zero();
 
     // loop over column tiles
 
@@ -1272,6 +1275,29 @@ __global__ void backward_kernel(
         });
 
         __syncthreads();
+
+        // todo: take care of ds
+
+        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
+            return el * scale;
+        });
+
+        __syncthreads();
+
+        QK_mma.store(C_sm);
+
+        __syncthreads();
+
+        // calculate dk
+
+        for (int k = 0; k < row_tile_size; k += chunk_size) {
+            Q_sm.load(q_, 0, row_tile_offset + k, 0, row_seq_len);
+            __syncthreads();
+
+            dk_mma.mma(C_sm, Q_sm, k, 0, chunk_size);
+            __syncthreads();
+        }
+
     }
 
     dv_mma.store(C_sm);
@@ -1279,6 +1305,14 @@ __global__ void backward_kernel(
     __syncthreads();
 
     C_sm.store(dv_, 0, col_tile_offset, 0, col_seq_len);
+
+    __syncthreads();
+
+    dk_mma.store(C_sm);
+
+    __syncthreads();
+
+    C_sm.store(dk_, 0, col_tile_offset, 0, col_seq_len);    
 }
 
 // forwards c++ function
