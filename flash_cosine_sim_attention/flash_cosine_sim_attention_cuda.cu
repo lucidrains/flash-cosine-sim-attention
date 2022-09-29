@@ -1138,13 +1138,14 @@ __global__ void backward_kernel(
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
     using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+    using D_sm_t = mem::shared_fragment<scalar_t, 1, QK_mma_t::N_tile>;
 
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
 
-    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
+    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
 
     // registers
 
@@ -1158,7 +1159,8 @@ __global__ void backward_kernel(
 
     K_sm_t K_sm{Q_sm.next()};
     V_sm_t V_sm{Q_sm.next()};
-    C_sm_t C_sm{K_sm.next()};
+    D_sm_t D_sm{K_sm.next()};
+    C_sm_t C_sm{D_sm.next()};
 
     // shortcut accessors
 
@@ -1242,6 +1244,25 @@ __global__ void backward_kernel(
             dv_mma.mma(C_sm, DO_sm, k, 0, chunk_size);
             __syncthreads();
         }
+
+        // calculate dp
+
+        QK_mma.zero();
+
+        for (int k = 0; k < dim_v; k += chunk_size) {
+            DO_sm.load_transpose(do_, k, row_tile_offset, 0, row_seq_len);
+            V_sm.load_transpose(v_, k, col_tile_offset, 0, col_seq_len);
+            __syncthreads();
+
+            QK_mma.mma(DO_sm, V_sm, k, 0, chunk_size);
+            __syncthreads();
+        }
+
+        // load pre-calculated delta
+
+        D_sm.load(delta_, 0, row_tile_offset, 0, row_seq_len);
+
+        __syncthreads();
     }
 
     dv_mma.store(C_sm);
