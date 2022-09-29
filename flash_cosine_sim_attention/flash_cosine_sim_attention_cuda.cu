@@ -1263,6 +1263,15 @@ __global__ void backward_kernel(
         D_sm.load(delta_, 0, row_tile_offset, 0, row_seq_len);
 
         __syncthreads();
+
+        // delta = rowsum(do * o), precomputed in backward preprocess
+        // calculate ds = (dp - delta) * p
+
+        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
+            return (el - D_sm(0, row)) * C_sm(col, row);
+        });
+
+        __syncthreads();
     }
 
     dv_mma.store(C_sm);
