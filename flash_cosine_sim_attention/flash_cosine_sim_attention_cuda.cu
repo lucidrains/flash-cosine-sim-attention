@@ -1136,6 +1136,7 @@ __global__ void backward_kernel(
     using QK_mma_t  = mma::warp_tile<scalar_t>;
     using dV_mma_t = mma::warp_tile<scalar_t>;
     using dK_mma_t = mma::warp_tile<scalar_t>;
+    using dQ_mma_t = mma::warp_tile<scalar_t>;
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
     using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
@@ -1153,6 +1154,7 @@ __global__ void backward_kernel(
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
     dK_mma_t dk_mma;
+    dQ_mma_t dq_mma;
 
     // shared memory
 
@@ -1298,6 +1300,19 @@ __global__ void backward_kernel(
             __syncthreads();
         }
 
+        QK_mma.store_transpose(C_sm);
+
+        __syncthreads();
+
+        dq_mma.zero();
+
+        for (int k = 0; k < col_tile_size; k += chunk_size) {
+            K_sm.load(q_, 0, col_tile_offset + k, 0, col_seq_len);
+            __syncthreads();
+
+            dq_mma.mma(C_sm, K_sm, k, 0, chunk_size);
+            __syncthreads();
+        }
     }
 
     dv_mma.store(C_sm);
