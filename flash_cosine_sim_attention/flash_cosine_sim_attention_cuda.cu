@@ -378,6 +378,28 @@ namespace mma {
                 }
             }
         }
+
+        // atomic add C from registers to gmem
+        template<typename accessor>
+        __device__ void atomic_add(accessor gmem, int row_tile_offset, int col_tile_offset, int row_max, int col_max) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int y = i * N_warp + thread_y;
+                int global_row = y + row_tile_offset;
+                if (global_row >= row_max)
+                    continue;
+
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    int x = j * M_warp + thread_x;
+                    int global_col = x + col_tile_offset;
+                    if (global_col >= col_max)
+                        continue;
+
+                    atomicAdd((float*) &gmem[global_row][global_col], C_frag[i * M_thread + j]);
+                }
+            }
+        }
     };
 
     using namespace nvcuda;
@@ -499,6 +521,24 @@ namespace mma {
                 for (int j = 0; j < M_thread; j++) {
                     int x = (warp_x * M_thread + j) * M_warp;
                     wmma::store_matrix_sync(reinterpret_cast<half*>(&C_sm(y, x)), C_frag[i * M_thread + j], shared_fragment::stride, wmma::mem_col_major);
+                }
+            }
+        }
+
+        // atomic add C from registers to gmem
+        template<typename accessor>
+        __device__ void atomic_add(accessor gmem, int row_tile_offset, int col_tile_offset, int row_max, int col_max) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < C_frag[i].num_elements; j++) {
+                    int col = col_tile_offset + get_warp_col(j) + warp_x * 16;
+                    int row = row_tile_offset + get_warp_row(j) + i * 16 + warp_y * 32;
+
+                    if (col >= col_max || row >= row_max)
+                        continue;
+
+                    atomicAdd((__half*) &gmem[row][col], C_frag[i].x[j]);
                 }
             }
         }
@@ -661,7 +701,7 @@ __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> o,
     const PackedAccessor<scalar_t, 3> l,
           PackedAccessor<scalar_t, 4> d_out_scaled,
-          PackedAccessor<scalar_t, 4> delta
+          PackedAccessor<scalar_t, 3> delta
 ) {
     const int heads = o.size(1);
     const int v_dim = o.size(3);
@@ -688,7 +728,7 @@ __global__ void backward_preprocess(
     auto o_ = o[batch_idx][head_idx][seq_idx];
     auto l_ = l[batch_idx][head_idx];
     auto do_scaled_ = d_out_scaled[batch_idx][head_idx][seq_idx];
-    auto delta_ = delta[batch_idx][head_idx][seq_idx];
+    auto delta_ = delta[batch_idx][head_idx];
 
     // load rowsum into shared memory
 
@@ -740,7 +780,7 @@ __global__ void backward_preprocess(
         // write out reduced rowsum(do_scaled * o)
 
         if (dim_idx == 0) {
-            delta_[0] = val;
+            delta_[seq_idx] = val;
         }
     }
 }
@@ -759,7 +799,7 @@ __global__ void backward_kernel(
           PackedAccessor<scalar_t, 4> dv,
           PackedAccessor<scalar_t, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out_scaled,
-    const PackedAccessor<scalar_t, 4> delta,
+    const PackedAccessor<scalar_t, 3> delta,
     const float scale,
     const bool causal,
     const bool has_mask,
@@ -917,7 +957,14 @@ __global__ void backward_kernel(
 
         // load pre-calculated delta
 
-        D_sm.load(delta_, 0, row_tile_offset, 0, row_seq_len);
+        for (int i = threadIdx.x; i < row_tile_size; i++) {
+            int global_row = row_tile_offset + i;
+
+            if (global_row >= row_seq_len)
+                continue;
+
+            D_sm.smem[i] = delta_[global_row];
+        }
 
         __syncthreads();
 
@@ -925,12 +972,18 @@ __global__ void backward_kernel(
         // calculate ds = (dp - delta) * p
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
-            return (el - D_sm(0, row)) * C_sm(col, row);
+            return (el - D_sm.smem[row]) * C_sm(col, row);
         });
 
         __syncthreads();
 
-        // todo: take care of ds
+        // accumulate to ds if needed
+
+        if (has_attn_bias) {
+            QK_mma.atomic_add(ds_, row_tile_offset, col_tile_offset, row_seq_len, col_seq_len);
+        }
+
+        // scale
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
             return el * scale;
@@ -965,6 +1018,8 @@ __global__ void backward_kernel(
             dq_mma.mma(C_sm, K_sm, k, 0, chunk_size);
             __syncthreads();
         }
+
+        dq_mma.atomic_add(dq_, 0, row_tile_offset, dim_qk, row_seq_len);
     }
 
     dv_mma.store(C_sm);
@@ -1086,7 +1141,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // setup dq, dk, dv
 
     auto d_out_scaled = at::empty_like(d_out, options);
-    auto delta = at::empty({batch, heads, seq, 1}, options);
+    auto delta = at::empty({batch, heads, seq}, options);
 
     auto dq = at::zeros_like(q, options);
     auto dk = at::zeros_like(k, options);
@@ -1121,7 +1176,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(o, 4, scalar_t),
                 ACCESSOR(l, 3, scalar_t),
                 ACCESSOR(d_out_scaled, 4, scalar_t),
-                ACCESSOR(delta, 4, scalar_t)
+                ACCESSOR(delta, 3, scalar_t)
             );
 
             backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block>>>(
@@ -1135,7 +1190,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(dv, 4, scalar_t),
                 ACCESSOR(db, 3, scalar_t),
                 ACCESSOR(d_out_scaled, 4, scalar_t),
-                ACCESSOR(delta, 4, scalar_t),
+                ACCESSOR(delta, 3, scalar_t),
                 scale,
                 causal,
                 has_mask,
