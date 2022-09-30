@@ -8,7 +8,7 @@ from torch.autograd import Function
 # try to import cuda
 
 try:
-    from flash_cosine_sim_attention_cuda import (
+    from flash_cosine_sim_attention_cuda_0_0_17 import (
         forward,
         backward
     )

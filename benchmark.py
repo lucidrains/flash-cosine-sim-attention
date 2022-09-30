@@ -58,9 +58,6 @@ permutations = list(product(*map(cast_tuple, params.values())))
 
 for name, dtype in (('float32', torch.float32), ('float16', torch.float16)):
 
-    if TEST_BACKWARDS and name == 'float16':
-        continue
-
     for batch, heads, dim in permutations:
         print('-' * 60)
         print(f'{name}\t\tbatch: {batch}\theads: {heads}\tdim {dim}\t')

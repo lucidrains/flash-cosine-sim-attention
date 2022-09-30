@@ -10,13 +10,17 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - Backwards kernel is still 3x slower, 1.5x slower for autoregressive
 
+- Thanks for Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
+
 ## Todo
 
-- [ ] make sure works with f16
-- [ ] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
-- [ ] make sure value dimensions can be 16, 32, 64, or 128 using the templating strategy recommended by Arthur
 - [ ] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
+- [ ] support dimensions of multiples of 16 for query keys and values up to 96 - 128 reserved for A100s
+- [ ] resolve f16 causal numerical issues
+- [ ] automate cache-busting of kernel using version as suffix to package name
+
+- [x] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 
 ## Appreciation
 

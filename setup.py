@@ -31,7 +31,7 @@ def ext_modules():
 
   return [
     CUDAExtension(
-      "flash_cosine_sim_attention_cuda",
+      "flash_cosine_sim_attention_cuda_0_0_17",
       sources = ["flash_cosine_sim_attention/flash_cosine_sim_attention_cuda.cu"]
     )
   ]
