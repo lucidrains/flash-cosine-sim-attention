@@ -971,7 +971,7 @@ __global__ void backward_kernel(
             V_sm.load_transpose(v_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
-            QK_mma.mma(DO_sm, V_sm, k, 0, chunk_size);
+            QK_mma.mma(DO_sm, V_sm, 0, 0, chunk_size);
             __syncthreads();
         }
 
@@ -1032,14 +1032,14 @@ __global__ void backward_kernel(
         dq_mma.zero();
 
         for (int k = 0; k < col_tile_size; k += chunk_size) {
-            K_sm.load(q_, 0, col_tile_offset + k, 0, col_seq_len);
+            K_sm.load(k_, 0, col_tile_offset + k, 0, col_seq_len);
             __syncthreads();
 
             dq_mma.mma(C_sm, K_sm, k, 0, chunk_size);
             __syncthreads();
         }
 
-        dq_mma.atomic_add(dq_, 0, row_tile_offset, dim_qk, row_seq_len);
+        dq_mma.atomic_add(dq_, row_tile_offset, 0, row_seq_len, dim_qk);
     }
 
     dv_mma.store(C_sm);
