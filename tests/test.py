@@ -81,9 +81,9 @@ def test_grad_equal(
     fdb = bias.grad if attn_bias else None
 
     assert allclose(dv, fdv)
-    assert allclose(dk, fdk)
 
-    # if attn_bias:
-    #     assert allclose(db, fdb)
+    if attn_bias:
+        assert allclose(db, fdb)
 
+    # assert allclose(dk, fdk)
     # assert allclose(dq, fdq)

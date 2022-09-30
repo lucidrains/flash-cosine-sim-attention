@@ -124,6 +124,23 @@ __constant__ float NULL_FLOAT_VALUE = -3.14159e5;
     }                                                                             \
   }
 
+// constants that depends on tensor dtype
+
+namespace constants {
+    template<typename scalar_t>
+    struct constants {
+        static constexpr float EPS = 1e-10;
+    };
+
+    using namespace nvcuda;
+    template<>
+    struct constants<c10::Half> {
+        static constexpr float EPS = 1e-3;
+    };
+}
+
+// shared memory struct
+
 namespace mem {
     template<typename T, int N_tile, int M_tile>
     struct shared_fragment {
@@ -213,13 +230,14 @@ namespace mem {
             return reinterpret_cast<char*>(smem + size);
         }
     };
-} // namespace mem
+}
 
-template <typename scalar_t, typename warp_tile_t>
+// rowsum accumulator
+
+template <typename scalar_t, typename warp_tile_t, typename consts>
 struct rowsum_accumulator {
     static constexpr int N_tile = warp_tile_t::N_tile;
     static constexpr int M_tile = warp_tile_t::M_tile;
-    static constexpr float EPS = 1e-10;
 
     float acc;
 
@@ -242,7 +260,7 @@ struct rowsum_accumulator {
     }
 
     __device__ void divide(scalar_t* smem, warp_tile_t& mma) {
-        if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, EPS);
+        if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, consts::EPS);
 
         __syncthreads();
 
@@ -263,6 +281,8 @@ struct rowsum_accumulator {
         gmem[row] = acc;
     }
 };
+
+// warp tile, done by @ahennequ Arthur Hennequin
 
 namespace mma {
     template<typename scalar_t>
@@ -594,7 +614,7 @@ __global__ void forward_kernel(
 
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
-    rowsum_accumulator<scalar_t, QK_mma_t> L_acc;
+    rowsum_accumulator<scalar_t, QK_mma_t, constants::constants<scalar_t>> L_acc;
 
     // shared memory
 
@@ -733,7 +753,7 @@ __global__ void backward_preprocess(
     // load rowsum into shared memory
 
     if (dim_idx == 0)
-        sm_inv_rowsum[0] = 1.f / max(l_[seq_idx], 1e-10);
+        sm_inv_rowsum[0] = 1.f / max(l_[seq_idx], constants::constants<scalar_t>::EPS);
 
     __syncthreads();
 
@@ -985,7 +1005,7 @@ __global__ void backward_kernel(
 
         // scale
 
-        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
+        QK_mma.pointwise([&](scalar_t el, int, int) -> scalar_t {
             return el * scale;
         });
 
