@@ -234,7 +234,7 @@ namespace mem {
 
 // rowsum accumulator
 
-template <typename scalar_t, typename warp_tile_t, typename consts>
+template <typename scalar_t, typename warp_tile_t, typename out_warp_tile_t, typename consts>
 struct rowsum_accumulator {
     static constexpr int N_tile = warp_tile_t::N_tile;
     static constexpr int M_tile = warp_tile_t::M_tile;
@@ -259,7 +259,7 @@ struct rowsum_accumulator {
         }
     }
 
-    __device__ void divide(scalar_t* smem, warp_tile_t& mma) {
+    __device__ void divide(scalar_t* smem, out_warp_tile_t& mma) {
         if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, consts::EPS);
 
         __syncthreads();
@@ -601,8 +601,9 @@ __global__ void forward_kernel(
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
-    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, out_mma_t::M_tile>;
     using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
+    using O_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, out_mma_t::M_tile>;
 
     const int row_tile_offset = blockIdx.x * QK_mma_t::N_tile;
 
@@ -614,14 +615,16 @@ __global__ void forward_kernel(
 
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
-    rowsum_accumulator<scalar_t, QK_mma_t, constants::constants<scalar_t>> L_acc;
+
+    rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t, constants::constants<scalar_t>> L_acc;
 
     // shared memory
 
     Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
+    V_sm_t V_sm{reinterpret_cast<char*>(_shared_mem)};
     K_sm_t K_sm{Q_sm.next()};
-    V_sm_t V_sm{Q_sm.next()};
     C_sm_t C_sm{K_sm.next()};
+    O_sm_t O_sm{K_sm.next()};
 
     out_mma.zero();
     L_acc.zero();
@@ -699,11 +702,11 @@ __global__ void forward_kernel(
 
     L_acc.divide(C_sm.smem, out_mma);
 
-    out_mma.store(C_sm);
+    out_mma.store(O_sm);
 
     __syncthreads();
 
-    C_sm.store(O_, 0, row_tile_offset, 0, row_seq_len);
+    O_sm.store(O_, 0, row_tile_offset, 0, row_seq_len);
 }
 
 // backward kernel
