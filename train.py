@@ -10,6 +10,7 @@ import torch
 import torch.optim as optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
+from torch.cuda.amp import autocast
 
 # arguments
 
@@ -27,6 +28,7 @@ VALIDATE_EVERY  = 100
 GENERATE_EVERY  = 500
 GENERATE_LENGTH = 512
 SEQ_LEN = 512
+USE_AMP = False
 
 # helpers
 
@@ -91,8 +93,9 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
     model.train()
 
     for __ in range(GRADIENT_ACCUMULATE_EVERY):
-        loss = model(next(train_loader), return_loss = True)
-        loss.backward()
+        with autocast(enabled = USE_AMP):
+            loss = model(next(train_loader), return_loss = True)
+            loss.backward()
 
     print(f'training loss: {loss.item()}')
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)

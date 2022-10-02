@@ -53,7 +53,9 @@ def plain_cosine_sim_attention(
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
+        dtype = q.dtype
         q, k = map(l2norm, (q, k))
+        q, k = map(lambda t: t.type(dtype), (q, k))
 
     sim = einsum('... i d, ... j d -> ... i j', q, k)
     sim = sim * scale
@@ -161,7 +163,9 @@ def flash_cosine_sim_attention(
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
+        dtype = q.dtype
         q, k = map(l2norm, (q, k))
+        q, k = map(lambda t: t.type(dtype), (q, k))
 
     o = FlashCosineSimAttention.apply(
         q, k, v,

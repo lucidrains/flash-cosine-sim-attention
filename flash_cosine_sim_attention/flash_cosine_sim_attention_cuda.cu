@@ -135,7 +135,7 @@ namespace constants {
     using namespace nvcuda;
     template<>
     struct constants<c10::Half> {
-        static constexpr float EPS = 1e-7;
+        static constexpr float EPS = 1e-10;
     };
 }
 
@@ -259,13 +259,13 @@ struct rowsum_accumulator {
         }
     }
 
-    __device__ void divide(scalar_t* smem, out_warp_tile_t& mma) {
+    __device__ void divide(float* smem, out_warp_tile_t& mma) {
         if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, consts::EPS);
 
         __syncthreads();
 
         mma.pointwise([&](scalar_t el, int, int y) {
-            return el * smem[y];
+            return (scalar_t) (el * smem[y]);
         });
 
         __syncthreads();
@@ -603,6 +603,7 @@ __global__ void forward_kernel(
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, out_mma_t::M_tile>;
     using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
+    using L_sm_t = mem::shared_fragment<float, QK_mma_t::N_tile, 1>;
     using O_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, out_mma_t::M_tile>;
 
     const int row_tile_offset = blockIdx.x * QK_mma_t::N_tile;
@@ -624,6 +625,7 @@ __global__ void forward_kernel(
     V_sm_t V_sm{reinterpret_cast<char*>(_shared_mem)};
     K_sm_t K_sm{Q_sm.next()};
     C_sm_t C_sm{K_sm.next()};
+    L_sm_t L_sm{K_sm.next()};
     O_sm_t O_sm{K_sm.next()};
 
     out_mma.zero();
@@ -700,7 +702,7 @@ __global__ void forward_kernel(
     if (need_store_rowsum)
         L_acc.store(l_, row_tile_offset, row_seq_len);
 
-    L_acc.divide(C_sm.smem, out_mma);
+    L_acc.divide(L_sm.smem, out_mma);
 
     out_mma.store(O_sm);
 

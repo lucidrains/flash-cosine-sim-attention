@@ -6,8 +6,8 @@ assert torch.cuda.is_available(), 'cuda must be available'
 
 # helper functions
 
-def no_nans(t):
-    return not torch.any(torch.isnan(t))
+def not_nan_or_infs(t):
+    return not (torch.any(torch.isnan(t)) or torch.any(torch.isinf(t)))
 
 def allclose(a, b, atol = 1e-4):
     diff = (a - b).abs().amax()
@@ -42,7 +42,7 @@ def test_output_equal(
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     flash_output = flash_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
 
-    assert no_nans(flash_output)
+    assert not_nan_or_infs(flash_output)
     assert allclose(plain_output, flash_output, atol = atol)
 
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
@@ -88,14 +88,14 @@ def test_grad_equal(
 
     fdb = bias.grad if attn_bias else None
 
-    assert no_nans(fdv)
-    assert no_nans(fdk)
-    assert no_nans(fdq)
+    assert not_nan_or_infs(fdv)
+    assert not_nan_or_infs(fdk)
+    assert not_nan_or_infs(fdq)
 
     assert allclose(dv, fdv, atol = atol)
 
     if attn_bias:
-        assert no_nans(fdb)
+        assert not_nan_or_infs(fdb)
         assert allclose(db, fdb, atol = atol)
 
     assert allclose(dk, fdk, atol = atol)
