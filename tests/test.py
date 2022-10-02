@@ -6,6 +6,9 @@ assert torch.cuda.is_available(), 'cuda must be available'
 
 # helper functions
 
+def no_nans(t):
+    return not torch.any(torch.isnan(t))
+
 def allclose(a, b, atol = 1e-4):
     diff = (a - b).abs().amax()
     return diff <= atol
@@ -39,6 +42,7 @@ def test_output_equal(
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
     flash_output = flash_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias)
 
+    assert no_nans(flash_output)
     assert allclose(plain_output, flash_output, atol = atol)
 
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
@@ -46,14 +50,18 @@ def test_output_equal(
 @pytest.mark.parametrize('seq_len', [63, 127])
 @pytest.mark.parametrize('qk_dim_head', [64])
 @pytest.mark.parametrize('v_dim_head', [64])
+@pytest.mark.parametrize('float16', [False, True])
 def test_grad_equal(
     causal,
     mask,
     attn_bias,
     seq_len,
     qk_dim_head,
-    v_dim_head
+    v_dim_head,
+    float16
 ):
+    dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
+
     q = torch.randn(4, 8, seq_len, qk_dim_head).cuda().requires_grad_()
     k = torch.randn(4, 8, seq_len, qk_dim_head).cuda().requires_grad_()
     v = torch.randn(4, 8, seq_len, v_dim_head).cuda().requires_grad_()
@@ -80,10 +88,15 @@ def test_grad_equal(
 
     fdb = bias.grad if attn_bias else None
 
-    assert allclose(dv, fdv)
+    assert no_nans(fdv)
+    assert no_nans(fdk)
+    assert no_nans(fdq)
+
+    assert allclose(dv, fdv, atol = atol)
 
     if attn_bias:
-        assert allclose(db, fdb)
+        assert no_nans(fdb)
+        assert allclose(db, fdb, atol = atol)
 
-    assert allclose(dk, fdk)
-    assert allclose(dq, fdq)
+    assert allclose(dk, fdk, atol = atol)
+    assert allclose(dq, fdq, atol = atol)

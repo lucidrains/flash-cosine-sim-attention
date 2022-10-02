@@ -135,7 +135,7 @@ namespace constants {
     using namespace nvcuda;
     template<>
     struct constants<c10::Half> {
-        static constexpr float EPS = 1e-3;
+        static constexpr float EPS = 1e-7;
     };
 }
 
