@@ -846,25 +846,12 @@ __global__ void backward_kernel(
 
     constexpr int chunk_size = 16;
 
-    // shared memory
+    // registers
 
     using QK_mma_t  = mma::warp_tile<scalar_t>;
     using dV_mma_t = mma::warp_tile<scalar_t>;
     using dK_mma_t = mma::warp_tile<scalar_t>;
     using dQ_mma_t = mma::warp_tile<scalar_t>;
-
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
-    using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
-    using D_sm_t = mem::shared_fragment<scalar_t, 1, QK_mma_t::N_tile>;
-
-    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
-    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
-
-    using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
-
-    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
-
-    // registers
 
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
@@ -873,6 +860,19 @@ __global__ void backward_kernel(
 
     // shared memory
 
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+    using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, dV_mma_t::M_tile>;
+    using D_sm_t = mem::shared_fragment<scalar_t, 1, QK_mma_t::N_tile>;
+
+    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+
+    using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
+    using DK_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, dK_mma_t::M_tile>;
+    using DV_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, dV_mma_t::M_tile>;
+
+    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
+
     Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
     DO_sm_t DO_sm{reinterpret_cast<char*>(_shared_mem)};
 
@@ -880,6 +880,8 @@ __global__ void backward_kernel(
     V_sm_t V_sm{Q_sm.next()};
     D_sm_t D_sm{K_sm.next()};
     C_sm_t C_sm{D_sm.next()};
+    DK_sm_t DK_sm{D_sm.next()};
+    DV_sm_t DV_sm{D_sm.next()};
 
     // shortcut accessors
 
@@ -1045,19 +1047,19 @@ __global__ void backward_kernel(
         dq_mma.atomic_add(dq_, row_tile_offset, 0, row_seq_len, dim_qk);
     }
 
-    dv_mma.store(C_sm);
+    dv_mma.store(DV_sm);
 
     __syncthreads();
 
-    C_sm.store(dv_, 0, col_tile_offset, 0, col_seq_len);
+    DV_sm.store(dv_, 0, col_tile_offset, 0, col_seq_len);
 
     __syncthreads();
 
-    dk_mma.store(C_sm);
+    dk_mma.store(DK_sm);
 
     __syncthreads();
 
-    C_sm.store(dk_, 0, col_tile_offset, 0, col_seq_len);    
+    DK_sm.store(dk_, 0, col_tile_offset, 0, col_seq_len);
 }
 
 // forwards c++ function
