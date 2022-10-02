@@ -10,7 +10,9 @@ import torch
 import torch.optim as optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
-from torch.cuda.amp import autocast
+from torch.cuda.amp import autocast, GradScaler
+
+torch.autograd.set_detect_anomaly(True)
 
 # arguments
 
@@ -28,7 +30,8 @@ VALIDATE_EVERY  = 100
 GENERATE_EVERY  = 500
 GENERATE_LENGTH = 512
 SEQ_LEN = 512
-USE_AMP = False
+
+USE_AMP = True
 
 # helpers
 
@@ -87,20 +90,26 @@ val_loader    = cycle(DataLoader(val_dataset, batch_size = BATCH_SIZE))
 
 optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+scaler = GradScaler(enabled = USE_AMP)
+
 # training
 
 for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
     model.train()
+    optim.zero_grad()
 
     for __ in range(GRADIENT_ACCUMULATE_EVERY):
         with autocast(enabled = USE_AMP):
             loss = model(next(train_loader), return_loss = True)
-            loss.backward()
+
+        scaler.scale(loss / GRADIENT_ACCUMULATE_EVERY).backward()
 
     print(f'training loss: {loss.item()}')
+
+    scaler.unscale_(optim)
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-    optim.step()
-    optim.zero_grad()
+    scaler.step(optim)
+    scaler.update()
 
     if i % VALIDATE_EVERY == 0:
         model.eval()
