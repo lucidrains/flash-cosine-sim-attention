@@ -573,7 +573,7 @@ __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> K,
     const PackedAccessor<scalar_t, 4> V,
           PackedAccessor<scalar_t, 4> O,
-          PackedAccessor<scalar_t, 3> l,
+          PackedAccessor<float, 3> l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
     const float scale,
@@ -724,7 +724,7 @@ template <typename scalar_t>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-    const PackedAccessor<scalar_t, 3> l,
+    const PackedAccessor<float, 3> l,
           PackedAccessor<scalar_t, 4> d_out_scaled,
           PackedAccessor<scalar_t, 3> delta
 ) {
@@ -747,7 +747,7 @@ __global__ void backward_preprocess(
 
     scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
     scalar_t* sm_do     = reinterpret_cast<scalar_t*>(&sm_delta[cdiv(v_dim, 32)]);
-    scalar_t* sm_inv_rowsum = reinterpret_cast<scalar_t*>(&sm_do[v_dim]);
+    float* sm_inv_rowsum = reinterpret_cast<float*>(&sm_do[v_dim]);
 
     auto do_ = d_out[batch_idx][head_idx][seq_idx];
     auto o_ = o[batch_idx][head_idx][seq_idx];
@@ -1076,6 +1076,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     bool causal,
     bool need_store_rowsum
 ) {
+    auto q_scalar_type = Q.scalar_type();
     auto query_device = device_of(Q);
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
@@ -1086,10 +1087,10 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     const int k_dim = Q.size(3);
     const int v_dim = V.size(3);
 
-    auto options = torch::TensorOptions().device(query_device).dtype(Q.scalar_type());
+    auto options = torch::TensorOptions().device(query_device);
 
-    auto O = at::empty({batch, heads, q_seq_len, v_dim}, options);
-    auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options);
+    auto O = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
+    auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
 
     const int max_feature_dimension = max(k_dim, v_dim);
 
@@ -1112,7 +1113,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
                 ACCESSOR(K, 4, scalar_t),
                 ACCESSOR(V, 4, scalar_t),
                 ACCESSOR(O, 4, scalar_t),
-                ACCESSOR(L, 3, scalar_t),
+                ACCESSOR(L, 3, float),
                 ACCESSOR(mask, 2, bool),
                 ACCESSOR(attn_bias, 3, scalar_t),
                 scale,
@@ -1195,13 +1196,13 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
             const unsigned backwards_preprocess_shared_mem_size = (
-                cdiv(v_dim, 32) + v_dim + 1
-            ) * sizeof(scalar_t);
+                cdiv(v_dim, 32) + v_dim
+            ) * sizeof(scalar_t) + sizeof(float);
 
             backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
                 ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(l, 3, scalar_t),
+                ACCESSOR(l, 3, float),
                 ACCESSOR(d_out_scaled, 4, scalar_t),
                 ACCESSOR(delta, 3, scalar_t)
             );

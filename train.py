@@ -31,7 +31,7 @@ GENERATE_EVERY  = 500
 GENERATE_LENGTH = 512
 SEQ_LEN = 512
 
-USE_AMP = True
+USE_AMP = False
 
 # helpers
 
