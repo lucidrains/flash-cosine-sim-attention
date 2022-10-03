@@ -40,17 +40,6 @@ __host__ __device__ int next_multiple_of(int num, int multiple_of) {
     return cdiv(num, multiple_of) * multiple_of;
 }
 
-__host__ __device__ int next_pow_2(int n) {
-    int i = 1;
-    while(i < n)
-        i *= 2;
-    return i;
-}
-
-bool divisible_by(int num, int denom) {
-    return (num % denom) == 0;
-}
-
 // Custom dispatch inspired from
 // https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
 // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h

@@ -8,6 +8,9 @@ test: install
 benchmark: install
 	python benchmark.py
 
+benchmark_causal: install
+	python benchmark.py --causal
+
 benchmark_forward: install
 	python benchmark.py --only-forwards
 
