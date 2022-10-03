@@ -87,6 +87,12 @@ $ python benchmark.py
 
 For only benchmarking forwards or backwards, append either `--only-forwards` or `--only-backwards` flag to the above
 
+## Training a small GPT on Enwik8
+
+```bash
+$ make train
+```
+
 ## Citations
 
 ```bibtex
