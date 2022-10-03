@@ -550,6 +550,7 @@ __global__ void forward_kernel(
     const bool causal,
     const bool has_mask,
     const bool has_attn_bias,
+    const bool attn_bias_batch_dim,
     const bool need_store_rowsum
 ) {
 
@@ -578,11 +579,9 @@ __global__ void forward_kernel(
 
     const int row_tile_offset = blockIdx.x * QK_mma_t::N_tile;
 
-    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
+    // registers
 
     float bias;
-
-    // registers
 
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
@@ -591,8 +590,12 @@ __global__ void forward_kernel(
 
     // shared memory
 
-    Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
-    V_sm_t V_sm{reinterpret_cast<char*>(_shared_mem)};
+    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
+
+    auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
+
+    Q_sm_t Q_sm{__shared_mem};
+    V_sm_t V_sm{__shared_mem};
     K_sm_t K_sm{Q_sm.next()};
     C_sm_t C_sm{K_sm.next()};
     L_sm_t L_sm{K_sm.next()};
@@ -609,7 +612,7 @@ __global__ void forward_kernel(
     auto V_ = V[batch][heads];
     auto O_ = O[batch][heads];
     auto mask_ = mask[batch];
-    auto bias_ = attn_bias[heads];
+    auto bias_ = attn_bias[attn_bias_batch_dim ? batch : heads];
 
     // renamed vars
 
@@ -780,6 +783,7 @@ __global__ void backward_kernel(
     const bool causal,
     const bool has_mask,
     const bool has_attn_bias,
+    const bool attn_bias_batch_dim,
     const bool attn_bias_requires_grad
 ) {
 
@@ -849,14 +853,14 @@ __global__ void backward_kernel(
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
-    auto ds_ = d_attn_bias[head_idx];
     auto delta_ = delta[batch_idx][head_idx];
     auto do_ = d_out_scaled[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
 
     // handle attention bias
 
-    auto bias_ = has_attn_bias ? attn_bias[head_idx] : attn_bias[0];
+    auto ds_ = d_attn_bias[attn_bias_batch_dim ? batch_idx : head_idx];
+    auto bias_ = has_attn_bias ? attn_bias[attn_bias_batch_dim ? batch_idx : head_idx] : attn_bias[0];
 
     // variables
 
@@ -1041,6 +1045,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     torch::Tensor V,
     torch::Tensor mask,
     torch::Tensor attn_bias,
+    bool attn_bias_batch_dim,
     float scale,
     bool causal,
     bool need_store_rowsum
@@ -1089,6 +1094,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
                 causal,
                 has_mask,
                 has_attn_bias,
+                attn_bias_batch_dim,
                 need_store_rowsum
             );
 
@@ -1115,6 +1121,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor v,
     torch::Tensor mask,
     torch::Tensor attn_bias,
+    bool attn_bias_batch_dim,
     float scale,
     bool causal,
     bool attn_bias_requires_grad
@@ -1190,6 +1197,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 causal,
                 has_mask,
                 has_attn_bias,
+                attn_bias_batch_dim,
                 attn_bias_requires_grad
             );
 

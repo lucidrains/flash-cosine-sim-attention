@@ -57,7 +57,8 @@ def plain_cosine_sim_attention(
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
     causal = False,
-    l2norm_qk = True
+    l2norm_qk = True,
+    attn_bias_batch_dim = False
 
 ) -> TensorType['b', 'h', 'i', 'e']:
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
@@ -71,7 +72,8 @@ def plain_cosine_sim_attention(
     sim = sim * scale
 
     if exists(attn_bias):
-        sim = sim + attn_bias[None, ...]
+        attn_bias = attn_bias[:, None, ...] if attn_bias_batch_dim else attn_bias[None, ...]
+        sim = sim + attn_bias
 
     mask_value = -torch.finfo(sim.dtype).max
 
@@ -95,7 +97,8 @@ class FlashCosineSimAttention(Function):
         mask,
         attn_bias,
         scale,
-        causal
+        causal,
+        attn_bias_batch_dim
     ):
         qk_dim, v_dim = q.shape[-1], v.shape[-1]
 
@@ -114,6 +117,7 @@ class FlashCosineSimAttention(Function):
             q, k, v,
             mask,
             attn_bias,
+            attn_bias_batch_dim,
             scale,
             causal,
             should_backwards
@@ -128,7 +132,8 @@ class FlashCosineSimAttention(Function):
 
         ctx.params = (
             scale,
-            causal
+            causal,
+            attn_bias_batch_dim
         )
 
         return o
@@ -143,7 +148,8 @@ class FlashCosineSimAttention(Function):
 
         (
             scale,
-            causal
+            causal,
+            attn_bias_batch_dim
         ) = ctx.params
 
         dq, dk, dv, db = backward(
@@ -151,6 +157,7 @@ class FlashCosineSimAttention(Function):
             q, k, v,
             mask,
             attn_bias,
+            attn_bias_batch_dim,
             scale,
             causal,
             attn_bias.requires_grad
@@ -170,7 +177,8 @@ def flash_cosine_sim_attention(
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
     causal = False,
-    l2norm_qk = True
+    l2norm_qk = True,
+    attn_bias_batch_dim = False
 ) -> TensorType['b', 'h', 'i', 'e']:
 
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
@@ -185,7 +193,8 @@ def flash_cosine_sim_attention(
         mask,
         attn_bias,
         scale,
-        causal
+        causal,
+        attn_bias_batch_dim
     )
 
     return o
