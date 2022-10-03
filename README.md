@@ -19,8 +19,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [ ] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 - [ ] support dimensions of multiples of 16 for query keys and values up to 96 - 128 reserved for A100s
-- [ ] automate cache-busting of kernel using version as suffix to package name
 
+- [x] automate cache-busting of kernel using version as suffix to package name
 - [x] resolve f16 causal numerical issues
 - [x] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 

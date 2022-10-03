@@ -11,6 +11,8 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 # which in turn was taken from
 # https://github.com/idiap/fast-transformers/blob/master/setup.py
 
+exec(open('flash_cosine_sim_attention/version.py').read())
+
 @lru_cache(None)
 def cuda_toolkit_available():
   try:
@@ -31,7 +33,7 @@ def ext_modules():
 
   return [
     CUDAExtension(
-      "flash_cosine_sim_attention_cuda_0_0_18",
+      __cuda_pkg_name__,
       sources = ["flash_cosine_sim_attention/flash_cosine_sim_attention_cuda.cu"]
     )
   ]
@@ -41,7 +43,7 @@ def ext_modules():
 setup(
   name = 'flash-cosine-sim-attention',
   packages = find_packages(exclude=[]),
-  version = '0.0.18',
+  version = __version__,
   license='MIT',
   description = 'Flash Cosine Similarity Attention',
   author = 'Phil Wang',

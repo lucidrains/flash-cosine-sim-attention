@@ -1,17 +1,22 @@
-import torch
+import importlib
 from typing import Optional
+
+import torch
 from torchtyping import TensorType
 from torch import einsum
 import torch.nn.functional as F
 from torch.autograd import Function
 
+exec(open('flash_cosine_sim_attention/version.py').read())
+
 # try to import cuda
 
 try:
-    from flash_cosine_sim_attention_cuda_0_0_18 import (
-        forward,
-        backward
-    )
+    cuda_pkg = importlib.import_module(__cuda_pkg_name__)
+
+    forward = cuda_pkg.forward
+    backward = cuda_pkg.backward
+
 except ImportError:
     print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')
 
