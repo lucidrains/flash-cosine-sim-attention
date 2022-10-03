@@ -660,7 +660,7 @@ __global__ void forward_kernel(
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return expf(scale * el + bias - scale); 
+            return __expf(scale * el + bias - scale);
         });
 
         QK_mma.store_transpose(C_sm);
@@ -933,7 +933,7 @@ __global__ void backward_kernel(
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return expf(scale * el + bias - scale) * L_sm.smem[row];
+            return __expf(scale * el + bias - scale) * L_sm.smem[row];
         });
 
         QK_mma.store(C_sm);

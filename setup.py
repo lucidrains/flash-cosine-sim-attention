@@ -31,7 +31,7 @@ def ext_modules():
 
   return [
     CUDAExtension(
-      "flash_cosine_sim_attention_cuda_0_0_17",
+      "flash_cosine_sim_attention_cuda_0_0_18",
       sources = ["flash_cosine_sim_attention/flash_cosine_sim_attention_cuda.cu"]
     )
   ]
@@ -41,7 +41,7 @@ def ext_modules():
 setup(
   name = 'flash-cosine-sim-attention',
   packages = find_packages(exclude=[]),
-  version = '0.0.17',
+  version = '0.0.18',
   license='MIT',
   description = 'Flash Cosine Similarity Attention',
   author = 'Phil Wang',

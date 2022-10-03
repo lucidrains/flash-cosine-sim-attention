@@ -8,12 +8,17 @@ from torch.autograd import Function
 # try to import cuda
 
 try:
-    from flash_cosine_sim_attention_cuda_0_0_17 import (
+    from flash_cosine_sim_attention_cuda_0_0_18 import (
         forward,
         backward
     )
 except ImportError:
     print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')
+
+# constants
+
+ALLOWED_QK_DIMS = (64,)
+ALLOWED_V_DIMS = (64,)
 
 # helper functions
 
@@ -88,6 +93,9 @@ class FlashCosineSimAttention(Function):
         causal
     ):
         qk_dim, v_dim = q.shape[-1], v.shape[-1]
+
+        assert (qk_dim in ALLOWED_QK_DIMS), f'query key dimension must be one of {ALLOWED_QK_DIMS}'
+        assert (v_dim in ALLOWED_V_DIMS), f'value dimension must be one of {ALLOWED_V_DIMS}'
 
         batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
 
