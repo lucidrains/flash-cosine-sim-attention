@@ -12,6 +12,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - Thanks for Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
 
+- All tests now pass for F16 and the transformer trains! Big thanks to Arthur 🙏
+
 ## Todo
 
 - [ ] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing

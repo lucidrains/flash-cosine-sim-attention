@@ -12,8 +12,6 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.cuda.amp import autocast, GradScaler
 
-torch.autograd.set_detect_anomaly(True)
-
 # arguments
 
 parser = argparse.ArgumentParser()
@@ -31,7 +29,7 @@ GENERATE_EVERY  = 500
 GENERATE_LENGTH = 512
 SEQ_LEN = 512
 
-USE_AMP = False
+USE_AMP = True
 
 # helpers
 

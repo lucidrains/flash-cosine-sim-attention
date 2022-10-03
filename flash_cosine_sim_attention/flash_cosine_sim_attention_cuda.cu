@@ -51,10 +51,6 @@ bool divisible_by(int num, int denom) {
     return (num % denom) == 0;
 }
 
-// constants
-
-__constant__ float NULL_FLOAT_VALUE = -3.14159e5;
-
 // Custom dispatch inspired from
 // https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
 // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
@@ -123,21 +119,6 @@ __constant__ float NULL_FLOAT_VALUE = -3.14159e5;
         }                                                                         \
     }                                                                             \
   }
-
-// constants that depends on tensor dtype
-
-namespace constants {
-    template<typename scalar_t>
-    struct constants {
-        static constexpr float EPS = 1e-10;
-    };
-
-    using namespace nvcuda;
-    template<>
-    struct constants<c10::Half> {
-        static constexpr float EPS = 1e-10;
-    };
-}
 
 // shared memory struct
 
@@ -234,7 +215,7 @@ namespace mem {
 
 // rowsum accumulator
 
-template <typename scalar_t, typename warp_tile_t, typename out_warp_tile_t, typename consts>
+template <typename scalar_t, typename warp_tile_t, typename out_warp_tile_t>
 struct rowsum_accumulator {
     static constexpr int N_tile = warp_tile_t::N_tile;
     static constexpr int M_tile = warp_tile_t::M_tile;
@@ -260,7 +241,7 @@ struct rowsum_accumulator {
     }
 
     __device__ void divide(float* smem, out_warp_tile_t& mma) {
-        if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, consts::EPS);
+        if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, 1e-10);
 
         __syncthreads();
 
@@ -617,7 +598,7 @@ __global__ void forward_kernel(
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
 
-    rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t, constants::constants<scalar_t>> L_acc;
+    rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t> L_acc;
 
     // shared memory
 
@@ -724,8 +705,6 @@ template <typename scalar_t>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-    const PackedAccessor<float, 3> l,
-          PackedAccessor<scalar_t, 4> d_out_scaled,
           PackedAccessor<scalar_t, 3> delta
 ) {
     const int heads = o.size(1);
@@ -741,43 +720,26 @@ __global__ void backward_preprocess(
 
     const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
 
+    // registers
+
     float val = 0.0f;
+
+    // shared memory
 
     extern __shared__ char _shared_mem_preprocess[];
 
-    scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
-    scalar_t* sm_do     = reinterpret_cast<scalar_t*>(&sm_delta[cdiv(v_dim, 32)]);
-    float* sm_inv_rowsum = reinterpret_cast<float*>(&sm_do[v_dim]);
+    float* sm_delta  = reinterpret_cast<float*>(&_shared_mem_preprocess);
+
+    // global mem accessors
 
     auto do_ = d_out[batch_idx][head_idx][seq_idx];
     auto o_ = o[batch_idx][head_idx][seq_idx];
-    auto l_ = l[batch_idx][head_idx];
-    auto do_scaled_ = d_out_scaled[batch_idx][head_idx][seq_idx];
     auto delta_ = delta[batch_idx][head_idx];
-
-    // load rowsum into shared memory
-
-    if (dim_idx == 0)
-        sm_inv_rowsum[0] = 1.f / max(l_[seq_idx], constants::constants<scalar_t>::EPS);
-
-    __syncthreads();
-
-    // load do into shared memory
-
-    if (dim_idx < v_dim)
-        sm_do[dim_idx] = do_[dim_idx] * sm_inv_rowsum[0];
-
-    __syncthreads();
-
-    // store do_scaled to gmem
-
-    if (dim_idx < v_dim)
-        do_scaled_[dim_idx] = sm_do[dim_idx];
 
     // load do_scaled * o into registers
 
     if (dim_idx < v_dim)
-        val = sm_do[dim_idx] * o_[dim_idx];
+        val = do_[dim_idx] * o_[dim_idx];
 
     // warp shuffle reduce
 
@@ -795,7 +757,7 @@ __global__ void backward_preprocess(
         if (dim_idx < (blockDim.x / 32)) {
             val = sm_delta[lane_id];
         } else{
-            val = 0;
+            val = 0.f;
         }
 
         for (int offset = 16; offset > 0; offset >>= 1) {
@@ -805,7 +767,7 @@ __global__ void backward_preprocess(
         // write out reduced rowsum(do_scaled * o)
 
         if (dim_idx == 0) {
-            delta_[seq_idx] = val;
+            delta_[seq_idx] = (scalar_t) val;
         }
     }
 }
@@ -816,7 +778,8 @@ template <typename scalar_t>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
-    const PackedAccessor<scalar_t, 4> v,    
+    const PackedAccessor<scalar_t, 4> v,
+    const PackedAccessor<float, 3> l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<scalar_t, 4> dq,
@@ -863,6 +826,7 @@ __global__ void backward_kernel(
     // shared memory
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+    using L_sm_t = mem::shared_fragment<float, 1, QK_mma_t::N_tile>;
     using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, dV_mma_t::M_tile>;
     using D_sm_t = mem::shared_fragment<scalar_t, 1, QK_mma_t::N_tile>;
 
@@ -875,8 +839,11 @@ __global__ void backward_kernel(
 
     __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
 
-    Q_sm_t Q_sm{reinterpret_cast<char*>(_shared_mem)};
-    DO_sm_t DO_sm{reinterpret_cast<char*>(_shared_mem)};
+    auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
+
+    Q_sm_t Q_sm{__shared_mem};
+    DO_sm_t DO_sm{__shared_mem};
+    L_sm_t L_sm{__shared_mem};
 
     K_sm_t K_sm{Q_sm.next()};
     V_sm_t V_sm{Q_sm.next()};
@@ -890,6 +857,7 @@ __global__ void backward_kernel(
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][head_idx];
     auto v_ = v[batch_idx][head_idx];
+    auto l_ = l[batch_idx][head_idx];
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
     auto dv_ = dv[batch_idx][head_idx];
@@ -938,6 +906,19 @@ __global__ void backward_kernel(
             __syncthreads();
         }
 
+        // load rowsums
+
+        for (int i = threadIdx.x; i < row_tile_size; i++) {
+            int global_row = row_tile_offset + i;
+
+            if (global_row >= row_seq_len)
+                continue;
+
+            L_sm.smem[i] = 1.f / max(l_[global_row], 1e-10);
+        }
+
+        __syncthreads();
+
         // scale and exponentiation, depending on masking or not
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
@@ -952,7 +933,7 @@ __global__ void backward_kernel(
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return expf(scale * el + bias - scale);
+            return expf(scale * el + bias - scale) * L_sm.smem[row];
         });
 
         QK_mma.store(C_sm);
@@ -1168,7 +1149,6 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     // setup dq, dk, dv
 
-    auto d_out_scaled = at::empty_like(d_out, options);
     auto delta = at::empty({batch, heads, seq}, options);
 
     auto dq = at::zeros_like(q, options);
@@ -1196,14 +1176,12 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
             const unsigned backwards_preprocess_shared_mem_size = (
-                cdiv(v_dim, 32) + v_dim
-            ) * sizeof(scalar_t) + sizeof(float);
+                cdiv(v_dim, 32)
+            ) * sizeof(float);
 
             backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
                 ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(l, 3, float),
-                ACCESSOR(d_out_scaled, 4, scalar_t),
                 ACCESSOR(delta, 3, scalar_t)
             );
 
@@ -1211,13 +1189,14 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
+                ACCESSOR(l, 3, float),
                 ACCESSOR(mask, 2, bool),
                 ACCESSOR(attn_bias, 3, scalar_t),
                 ACCESSOR(dq, 4, scalar_t),
                 ACCESSOR(dk, 4, scalar_t),
                 ACCESSOR(dv, 4, scalar_t),
                 ACCESSOR(db, 3, scalar_t),
-                ACCESSOR(d_out_scaled, 4, scalar_t),
+                ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(delta, 3, scalar_t),
                 scale,
                 causal,
