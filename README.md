@@ -93,6 +93,12 @@ For only benchmarking forwards or backwards, append either `--only-forwards` or 
 $ make train
 ```
 
+Try 8192 sequence length. It'll be slow but will work (normal attention will break at > 2048, you'll see this if you remove the `--use-cuda-kernel` flag)
+
+```python
+$ python train.py --seq-len 8192 --use-cuda-kernel
+```
+
 ## Citations
 
 ```bibtex
