@@ -16,10 +16,10 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 ## Todo
 
-- [ ] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 - [ ] support dimensions of multiples of 16 for query keys and values up to 96 - 128 reserved for A100s
 
+- [x] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
 - [x] automate cache-busting of kernel using version as suffix to package name
 - [x] resolve f16 causal numerical issues
 - [x] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
@@ -47,6 +47,47 @@ k = torch.randn(1, 8, 1024, 64).cuda()
 v = torch.randn(1, 8, 1024, 64).cuda()
 
 out = flash_cosine_sim_attention(q, k, v)  # (1, 8, 1024, 64)
+```
+
+Cross attention
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(1, 8, 1024, 64).cuda()
+k = torch.randn(1, 8, 2048, 64).cuda()
+v = torch.randn(1, 8, 2048, 64).cuda()
+
+out = flash_cosine_sim_attention(q, k, v)
+```
+
+With key / value masking
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(1, 8, 1024, 64).cuda()
+k = torch.randn(1, 8, 2048, 64).cuda()
+v = torch.randn(1, 8, 2048, 64).cuda()
+
+mask = torch.ones(1, 2048).bool().cuda()
+
+out = flash_cosine_sim_attention(q, k, v, mask = mask) # (1, 8, 1024, 64)
+```
+
+Autoregressive
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(1, 8, 1024, 64).cuda()
+k = torch.randn(1, 8, 1024, 64).cuda()
+v = torch.randn(1, 8, 1024, 64).cuda()
+
+out = flash_cosine_sim_attention(q, k, v, causal = True)  # (1, 8, 1024, 64)
 ```
 
 ## Description
