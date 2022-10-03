@@ -685,8 +685,7 @@ __global__ void forward_kernel(
 
 // backwards preprocess
 
-// 1. do_scaled = do / rowsum
-// 2. delta = rowsum(do_scaled * o)
+// delta = rowsum(do * o)
 
 // done by @ptillet at https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
 
