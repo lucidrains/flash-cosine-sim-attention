@@ -207,9 +207,10 @@ namespace mem {
             for (int i = threadIdx.x; i < row_tile_size; i += blockDim.x) {
                 int global_row = row_offset + i;
 
-                if (global_row < row_max) {
-                    smem[i] = op(gmem[global_row]);
-                }
+                if (global_row >= row_max)
+                    continue;
+
+                smem[i] = op(gmem[global_row]);
             }
         }
     };
@@ -496,7 +497,7 @@ namespace mma {
         }
 
         __device__ int get_warp_row(int i) {
-            int tid = threadIdx.x % 32;
+            int tid = threadIdx.x & 31;
             #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
                 if (std::is_same<output_t, half>::value) {
                     return (tid & 3) + ((tid & 4) << 1) + ((tid & 16) >> 2);
@@ -509,7 +510,7 @@ namespace mma {
         }
 
         __device__ int get_warp_col(int i) {
-            int tid = threadIdx.x % 32;
+            int tid = threadIdx.x & 31;
             #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
                 if (std::is_same<output_t, half>::value) {
                     return (i & 7) + (tid & 8);
@@ -756,7 +757,7 @@ __global__ void backward_preprocess(
     const int dim_idx = threadIdx.x;
 
     const int warp_id = threadIdx.x / 32;
-    const int lane_id = threadIdx.x % 32;
+    const int lane_id = threadIdx.x & 31;
 
     const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
 
@@ -792,24 +793,26 @@ __global__ void backward_preprocess(
 
     __syncthreads();
 
-    if (warp_id == 0) {
-        // use shared memory to reduce further across warps
-        if (dim_idx < (blockDim.x / 32)) {
-            val = sm_delta[lane_id];
-        } else{
-            val = 0.f;
-        }
+    if (warp_id != 0)
+        return;
 
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            val += __shfl_down_sync(mask, val, offset);
-        }
-
-        // write out reduced rowsum(do_scaled * o)
-
-        if (dim_idx == 0) {
-            delta_[seq_idx] = (scalar_t) val;
-        }
+    // use shared memory to reduce further across warps
+    if (dim_idx < (blockDim.x / 32)) {
+        val = sm_delta[lane_id];
+    } else {
+        val = 0.f;
     }
+
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(mask, val, offset);
+    }
+
+    // write out reduced rowsum(do_scaled * o)
+
+    if (dim_idx != 0)
+        return;
+
+    delta_[seq_idx] = (scalar_t) val;
 }
 
 // main backward kernel
