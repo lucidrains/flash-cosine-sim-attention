@@ -26,6 +26,11 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [x] resolve f16 causal numerical issues
 - [x] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 
+## Supported head dimensions (wip)
+
+Query / Keys - 64
+Values - 64
+
 ## Appreciation
 
 - <a href="https://github.com/ahennequ">Arthur Hennequin</a> for coaching me through my first CUDA kernel, and for coding up a simple <a href="https://github.com/ahennequ/pytorch-custom-mma">reference implementation</a>, which helped me to bootstrap the first kernel that comes within reasonable performance to baseline. This work would not have been possible without his expertise.
@@ -39,6 +44,8 @@ $ pip install flash-cosine-sim-attention
 ```
 
 ## Usage
+
+Self Attention
 
 ```python
 import torch
