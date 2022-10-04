@@ -609,6 +609,7 @@ __global__ void forward_kernel(
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, out_mma_t::M_tile>;
     using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
+    using mask_sm_t = mem::shared_fragment<bool, 2, QK_mma_t::M_tile>;
     using L_sm_t = mem::shared_fragment<float, QK_mma_t::N_tile, 1>;
     using O_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, out_mma_t::M_tile>;
 
@@ -635,6 +636,7 @@ __global__ void forward_kernel(
     C_sm_t C_sm{K_sm.next()};
     L_sm_t L_sm{K_sm.next()};
     O_sm_t O_sm{K_sm.next()};
+    mask_sm_t mask_sm{K_sm.next()};
 
     out_mma.zero();
     L_acc.zero();
@@ -673,6 +675,13 @@ __global__ void forward_kernel(
             __syncthreads();
         }
 
+        // store mask into smem if needed
+
+        if (has_mask)
+            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len, [](bool el) {return el;});
+
+        __syncthreads();
+
         // scale and exponentiation, depending on masking or not
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
@@ -682,13 +691,16 @@ __global__ void forward_kernel(
             if ((attn_col >= col_seq_len) ||
                 (attn_row >= row_seq_len) ||
                 (causal && ((attn_col - seq_len_diff) > attn_row)) ||
-                (has_mask && !mask_[attn_col]))
+                (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
             return __expf(scale * el + bias - scale);
         });
+
+        if (has_mask)
+            __syncthreads();
 
         QK_mma.store_transpose(C_sm);
 
@@ -859,6 +871,7 @@ __global__ void backward_kernel(
     using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
     using DK_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, dK_mma_t::M_tile>;
     using DV_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, dV_mma_t::M_tile>;
+    using mask_sm_t = mem::shared_fragment<bool, 1, dV_mma_t::M_tile>;
 
     __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
 
@@ -872,6 +885,7 @@ __global__ void backward_kernel(
     V_sm_t V_sm{Q_sm.next()};
     D_sm_t D_sm{K_sm.next()};
     C_sm_t C_sm{D_sm.next()};
+    mask_sm_t mask_sm{D_sm.next()};
     DK_sm_t DK_sm{D_sm.next()};
     DV_sm_t DV_sm{D_sm.next()};
 
@@ -937,6 +951,11 @@ __global__ void backward_kernel(
             return 1.f / max(el, 1e-10);
         });
 
+        // store mask into smem if needed
+
+        if (has_mask)
+            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len, [](bool el) {return el;});
+
         __syncthreads();
 
         // scale and exponentiation, depending on masking or not
@@ -948,13 +967,16 @@ __global__ void backward_kernel(
             if ((attn_col >= col_seq_len) ||
                 (attn_row >= row_seq_len) ||
                 (causal && ((attn_col - seq_len_diff) > attn_row)) ||
-                (has_mask && !mask_[attn_col]))
+                (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
             return __expf(scale * el + bias - scale) * L_sm.smem[row];
         });
+
+        if (has_mask)
+            __syncthreads();
 
         QK_mma.store(C_sm);
 
@@ -987,7 +1009,7 @@ __global__ void backward_kernel(
 
         __syncthreads();
 
-        D_sm.store_row(delta_, row_tile_offset, row_tile_size, row_seq_len, [=](scalar_t el) {return el;});
+        D_sm.store_row(delta_, row_tile_offset, row_tile_size, row_seq_len, [](scalar_t el) {return el;});
 
         __syncthreads();
 
