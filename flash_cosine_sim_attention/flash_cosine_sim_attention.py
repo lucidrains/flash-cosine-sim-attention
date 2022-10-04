@@ -2,7 +2,6 @@ import importlib
 from typing import Optional
 
 import torch
-from torchtyping import TensorType
 from torch import einsum
 import torch.nn.functional as F
 from torch.autograd import Function
@@ -41,6 +40,14 @@ def divisible_by(numer, denom):
 def l2norm(t):
     return F.normalize(t, dim = -1)
 
+def l2norm_tensors(*tensors):
+    assert len(tensors) > 0
+    dtype = tensors[0].dtype
+
+    tensors = tuple(map(l2norm, tensors))
+    tensors = tuple(map(lambda t: t.type(dtype), tensors))
+    return tensors
+
 # original cosine sim attention
 
 # b - batch
@@ -50,25 +57,25 @@ def l2norm(t):
 # d - feature dimension
 
 def plain_cosine_sim_attention(
-    q: TensorType['b', 'h', 'i', 'd'],
-    k: TensorType['b', 'h', 'j', 'd'],
-    v: TensorType['b', 'h', 'j', 'd'],
-    mask: Optional[TensorType['b', 'j']] = None,
-    attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
+    q,
+    k,
+    v,
+    mask = None,
+    attn_bias = None,
     scale = 10,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False
 
-) -> TensorType['b', 'h', 'i', 'd']:
+):
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
+    single_head_kv = k.ndim == 3
 
     if l2norm_qk:
-        dtype = q.dtype
-        q, k = map(l2norm, (q, k))
-        q, k = map(lambda t: t.type(dtype), (q, k))
+        q, k = l2norm_tensors(q, k)
 
-    sim = einsum('... i d, ... j d -> ... i j', q, k)
+    kv_einsum_eq = 'b j d' if single_head_kv else 'b h j d'
+    sim = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', q, k)
     sim = sim * scale
 
     if exists(attn_bias):
@@ -85,7 +92,7 @@ def plain_cosine_sim_attention(
         sim = sim.masked_fill(~mask[:, None, None, :], mask_value)
 
     attn = sim.softmax(dim = -1)
-    return einsum('... i j, ... j d -> ... i d', attn, v)
+    return einsum(f'b h i j, {kv_einsum_eq} -> b h i d', attn, v)
 
 # main class
 
@@ -103,6 +110,7 @@ class FlashCosineSimAttention(Function):
         batch, heads, seq, dim_qk, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
         assert dim_qk == dim, 'query / key head dimension must be equal to value head dimension for now'
 
+        single_head_kv = k.ndim == 3
         is_half = dtype == torch.float16
 
         assert is_half or (dim in ALLOWED_DIMS), f'query key dimension must be one of {ALLOWED_DIMS}'
@@ -113,6 +121,9 @@ class FlashCosineSimAttention(Function):
         attn_bias = default(attn_bias, torch.empty(1, 0, 0, device = q.device, dtype = dtype))
 
         should_backwards = any([*map(lambda t: t.requires_grad, (q, k, v, attn_bias))])
+
+        if single_head_kv:
+            k, v = map(lambda t: t.unsqueeze(1), (k, v))
 
         o, l = forward(
             q, k, v,
@@ -132,9 +143,11 @@ class FlashCosineSimAttention(Function):
         ctx.save_for_backward(o, l, q, k, v, mask, attn_bias)
 
         ctx.params = (
+            dtype,
             scale,
             causal,
-            attn_bias_batch_dim
+            attn_bias_batch_dim,
+            single_head_kv
         )
 
         return o
@@ -148,9 +161,11 @@ class FlashCosineSimAttention(Function):
         batch, heads, src_seq, tgt_seq, device, dtype = *q.shape[:3], k.shape[2], q.device, q.dtype
 
         (
+            dtype,
             scale,
             causal,
-            attn_bias_batch_dim
+            attn_bias_batch_dim,
+            single_head_kv
         ) = ctx.params
 
         dq, dk, dv, db = backward(
@@ -166,28 +181,35 @@ class FlashCosineSimAttention(Function):
 
         db = db if attn_bias.requires_grad else None
 
+        if single_head_kv:
+            dk, dv = map(lambda t: t.squeeze(1), (dk, dv))
+
+        dq = dq.type(dtype)
+        dk = dk.type(dtype)
+        dv = dv.type(dtype)
+
+        if exists(db):
+            db = db.type(dtype)
+
         return dq, dk, dv, None, db, None, None, None, None, None, None, None, None, None, None
 
 # wrapper function
 
 def flash_cosine_sim_attention(
-    q: TensorType['b', 'h', 'i', 'd'],
-    k: TensorType['b', 'h', 'j', 'd'],
-    v: TensorType['b', 'h', 'j', 'd'],
-    mask: Optional[TensorType['b', 'j']] = None,
-    attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
+    q,
+    k,
+    v,
+    mask = None,
+    attn_bias = None,
     scale = 10,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False
-) -> TensorType['b', 'h', 'i', 'd']:
-
+):
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
-        dtype = q.dtype
-        q, k = map(l2norm, (q, k))
-        q, k = map(lambda t: t.type(dtype), (q, k))
+        q, k = l2norm_tensors(q, k)
 
     o = FlashCosineSimAttention.apply(
         q, k, v,

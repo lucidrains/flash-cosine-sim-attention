@@ -56,8 +56,7 @@ setup(
     'attention mechanism'
   ],
   install_requires=[
-    'torch>=1.10',
-    'torchtyping'
+    'torch>=1.10'
   ],
   setup_requires=[
     'pytest-runner',

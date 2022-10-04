@@ -21,6 +21,7 @@ def allclose(a, b, atol = 1e-4):
 @pytest.mark.parametrize('dim_head', [64])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
+@pytest.mark.parametrize('single_head_kv', [False, True])
 def test_output_equal(
     causal,
     mask,
@@ -28,14 +29,17 @@ def test_output_equal(
     seq_len,
     dim_head,
     float16,
-    attn_bias_batch_dim
+    attn_bias_batch_dim,
+    single_head_kv
 ):
     batch, heads = 4, 8
     dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
 
+    kv_shape = (batch, heads, seq_len, dim_head) if not single_head_kv else (batch, seq_len, dim_head)
+
     q = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
-    k = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
-    v = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
+    k = torch.randn(kv_shape, dtype = dtype).cuda()
+    v = torch.randn(kv_shape, dtype = dtype).cuda()
 
     attn_mask = torch.randint(0, 2, (batch, seq_len), dtype = torch.bool).cuda() if mask else None
     bias = torch.randn(batch if attn_bias_batch_dim else heads, seq_len, seq_len, dtype = dtype).cuda() if attn_bias else None
@@ -52,6 +56,7 @@ def test_output_equal(
 @pytest.mark.parametrize('dim_head', [64])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
+@pytest.mark.parametrize('single_head_kv', [False, True])
 def test_grad_equal(
     causal,
     mask,
@@ -59,17 +64,20 @@ def test_grad_equal(
     seq_len,
     dim_head,
     float16,
-    attn_bias_batch_dim
+    attn_bias_batch_dim,
+    single_head_kv
 ):
     batch, heads = 4, 8
     dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
 
-    q = torch.randn(batch, heads, seq_len, dim_head).cuda().requires_grad_()
-    k = torch.randn(batch, heads, seq_len, dim_head).cuda().requires_grad_()
-    v = torch.randn(batch, heads, seq_len, dim_head).cuda().requires_grad_()
+    kv_shape = (batch, heads, seq_len, dim_head)
+
+    q = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda().requires_grad_()
+    k = torch.randn(kv_shape, dtype = dtype).cuda().requires_grad_()
+    v = torch.randn(kv_shape, dtype = dtype).cuda().requires_grad_()
 
     attn_mask = torch.randint(0, 2, (batch, seq_len), dtype = torch.bool).cuda() if mask else None
-    bias = torch.randn(batch if attn_bias_batch_dim else heads, seq_len, seq_len).cuda().requires_grad_() if attn_bias else None
+    bias = torch.randn(batch if attn_bias_batch_dim else heads, seq_len, seq_len, dtype = dtype).cuda().requires_grad_() if attn_bias else None
 
     plain_output = plain_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias, attn_bias_batch_dim = attn_bias_batch_dim)
     plain_output.sum().backward()

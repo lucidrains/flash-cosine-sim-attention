@@ -14,12 +14,15 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - All tests now pass for F16 and the transformer trains! Big thanks to Arthur 🙏
 
+- There is a bug with the atomicAdd for dQ for F16, so F16 is still not safe for use
+
 ## Todo
 
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 - [ ] support dimensions of multiples of 16 for query keys and values up to 96 - 128 reserved for A100s
 - [ ] allow for single-headed key / values, as in PaLM
 - [ ] support O(n) 1d dynamic positional bias
+- [ ] fix atomic add for f16
 
 - [x] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
 - [x] automate cache-busting of kernel using version as suffix to package name

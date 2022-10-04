@@ -579,10 +579,10 @@ namespace mma {
 
 template <typename scalar_t, int tile_size>
 __global__ void forward_kernel(
-    const PackedAccessor<scalar_t, 4> Q,
-    const PackedAccessor<scalar_t, 4> K,
-    const PackedAccessor<scalar_t, 4> V,
-          PackedAccessor<scalar_t, 4> O,
+    const PackedAccessor<scalar_t, 4> q,
+    const PackedAccessor<scalar_t, 4> k,
+    const PackedAccessor<scalar_t, 4> v,
+          PackedAccessor<scalar_t, 4> o,
           PackedAccessor<float, 3> l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
@@ -591,19 +591,20 @@ __global__ void forward_kernel(
     const bool has_mask,
     const bool has_attn_bias,
     const bool attn_bias_batch_dim,
-    const bool need_store_rowsum
+    const bool need_store_rowsum,
+    const bool is_single_head_kv
 ) {
-
     // dimensions
 
     const int batch = blockIdx.y;
     const int heads = blockIdx.z;
+    const int kv_heads = is_single_head_kv ? 0 : heads;
 
-    const int row_seq_len = Q.size(2);
-    const int col_seq_len = K.size(2);
+    const int row_seq_len = q.size(2);
+    const int col_seq_len = k.size(2);
     const int seq_len_diff = col_seq_len - row_seq_len;
 
-    const int dim_qk = Q.size(3);
+    const int dim_qk = q.size(3);
 
     constexpr int chunk_size = 16;
 
@@ -648,11 +649,11 @@ __global__ void forward_kernel(
 
     // shortcut accessors
 
-    auto Q_ = Q[batch][heads];
-    auto K_ = K[batch][heads];
+    auto Q_ = q[batch][heads];
+    auto K_ = k[batch][kv_heads];
+    auto V_ = v[batch][kv_heads];
     auto l_ = l[batch][heads];
-    auto V_ = V[batch][heads];
-    auto O_ = O[batch][heads];
+    auto O_ = o[batch][heads];
     auto mask_ = mask[batch];
     auto bias_ = attn_bias[attn_bias_batch_dim ? batch : heads];
 
@@ -671,9 +672,9 @@ __global__ void forward_kernel(
 
         // get qk similarity matrix
 
-        for (int k = 0; k < dim_qk; k += chunk_size) {
-            Q_sm.load_transpose(Q_, k, row_tile_offset, 0, row_seq_len);
-            K_sm.load_transpose(K_, k, col_tile_offset, 0, col_seq_len);
+        for (int i = 0; i < dim_qk; i += chunk_size) {
+            Q_sm.load_transpose(Q_, i, row_tile_offset, 0, row_seq_len);
+            K_sm.load_transpose(K_, i, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
             QK_mma.mma(Q_sm, K_sm, 0, 0, chunk_size);
@@ -715,11 +716,11 @@ __global__ void forward_kernel(
 
         // aggregate values with attention matrix
 
-        for (int k = 0; k < col_tile_size; k += chunk_size) {
-            V_sm.load(V_, 0, col_tile_offset + k, 0, col_seq_len);
+        for (int i = 0; i < col_tile_size; i += chunk_size) {
+            V_sm.load(V_, 0, col_tile_offset + i, 0, col_seq_len);
             __syncthreads();
 
-            out_mma.mma(C_sm, V_sm, k, 0, chunk_size);
+            out_mma.mma(C_sm, V_sm, i, 0, chunk_size);
             __syncthreads();
         }
     }
@@ -835,7 +836,8 @@ __global__ void backward_kernel(
     const bool has_mask,
     const bool has_attn_bias,
     const bool attn_bias_batch_dim,
-    const bool attn_bias_requires_grad
+    const bool attn_bias_requires_grad,
+    const bool is_single_head_kv
 ) {
 
     // dimensions
@@ -844,6 +846,7 @@ __global__ void backward_kernel(
 
     const int batch_idx = blockIdx.x / head;
     const int head_idx = blockIdx.x % head;
+    const int kv_head_idx = is_single_head_kv ? 0 : head_idx;
 
     const int row_seq_len = q.size(2);
     const int col_seq_len = k.size(2);
@@ -900,8 +903,8 @@ __global__ void backward_kernel(
     // shortcut accessors
 
     auto q_ = q[batch_idx][head_idx];
-    auto k_ = k[batch_idx][head_idx];
-    auto v_ = v[batch_idx][head_idx];
+    auto k_ = k[batch_idx][kv_head_idx];
+    auto v_ = v[batch_idx][kv_head_idx];
     auto l_ = l[batch_idx][head_idx];
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][head_idx];
@@ -1100,20 +1103,24 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
-    const int batch = q.size(0);
-    const int heads = q.size(1);
+    const int batch     = q.size(0);
+    const int heads     = q.size(1);
+    const int kv_heads  = k.size(1);
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
-    const int k_dim = q.size(3);
-    const int v_dim = v.size(3);
+    const int k_dim     = q.size(3);
+    const int v_dim     = v.size(3);
+
+    const bool is_single_head_kv = heads > 1 && kv_heads == 1;
+    const bool has_attn_bias     = !!attn_bias.numel();
+    const bool has_mask          = !!mask.numel();
+
+    // create intermediate or output tensors
 
     auto options = torch::TensorOptions().device(query_device);
 
     auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
     auto l = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
-
-    const bool has_attn_bias = !!attn_bias.numel();
-    const bool has_mask = !!mask.numel();
 
     // setup threads per block
 
@@ -1145,7 +1152,8 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
                 has_mask,
                 has_attn_bias,
                 attn_bias_batch_dim,
-                need_store_rowsum
+                need_store_rowsum,
+                is_single_head_kv
             );
 
         ), ())
@@ -1181,19 +1189,21 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
-    const int batch = q.size(0);
-    const int heads = q.size(1);
-    const int seq   = q.size(2);
-    const int k_seq = k.size(2);
-    const int k_dim = k.size(3);
-    const int v_dim = v.size(3);
+    const int batch    = q.size(0);
+    const int heads    = q.size(1);
+    const int kv_heads = k.size(1);
+    const int seq      = q.size(2);
+    const int k_seq    = k.size(2);
+    const int k_dim    = k.size(3);
+    const int v_dim    = v.size(3);
 
-    const bool has_attn_bias = !!attn_bias.numel();
-    const bool has_mask = !!mask.numel();
+    const bool is_single_head_kv = heads > 1 && kv_heads == 1;
+    const bool has_attn_bias     = !!attn_bias.numel();
+    const bool has_mask          = !!mask.numel();
+
+    // create intermediate or output tensors
 
     auto options = torch::TensorOptions().device(query_device).dtype(q_scalar_type);
-
-    // setup dq, dk, dv
 
     auto delta = at::empty({batch, heads, seq}, options);
 
@@ -1246,7 +1256,8 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 has_mask,
                 has_attn_bias,
                 attn_bias_batch_dim,
-                attn_bias_requires_grad
+                attn_bias_requires_grad,
+                is_single_head_kv
             );
 
         ), ())
