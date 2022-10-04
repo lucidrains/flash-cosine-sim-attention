@@ -72,7 +72,7 @@ def plain_cosine_sim_attention(
     sim = sim * scale
 
     if exists(attn_bias):
-        attn_bias = attn_bias[:, None, ...] if attn_bias_batch_dim else attn_bias[None, ...]
+        attn_bias = attn_bias.unsqueeze(1 if attn_bias_batch_dim else 0)
         sim = sim + attn_bias
 
     mask_value = -torch.finfo(sim.dtype).max

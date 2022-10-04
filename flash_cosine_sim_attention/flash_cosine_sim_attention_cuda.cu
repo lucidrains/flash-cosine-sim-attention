@@ -1117,13 +1117,14 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
 
+    const int tile_size = 64;
     const dim3 threads_per_block(256);
 
     AT_TYPE_DISPATCH_SWITCH(q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
 
             const dim3 blocks(
-                cdiv(q_seq_len, mma::warp_tile<scalar_t>::N_tile),
+                cdiv(q_seq_len, tile_size),
                 batch,
                 heads
             );
@@ -1204,6 +1205,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     // setup backwards call
 
+    const int tile_size = 64;
     const dim3 backwards_threads_per_block(256);
 
     AT_TYPE_DISPATCH_SWITCH(q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
@@ -1211,7 +1213,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
             const dim3 backwards_blocks(
                 batch * heads,
-                cdiv(k_seq, mma::warp_tile<scalar_t>::M_tile)
+                cdiv(k_seq, tile_size)
             );
 
             const dim3 backwards_preprocess_blocks(batch * heads, seq);
