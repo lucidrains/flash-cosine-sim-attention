@@ -28,8 +28,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 ## Supported head dimensions (wip)
 
-Query / Keys - 64
-Values - 64
+- Query / Keys [64]
+- Values [64]
 
 ## Appreciation
 
