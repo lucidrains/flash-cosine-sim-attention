@@ -767,7 +767,7 @@ __global__ void backward_preprocess(
 
     // shared memory
 
-    extern __shared__ char _shared_mem_preprocess[];
+    __shared__ float _shared_mem_preprocess[64 / 32];
 
     float* sm_delta  = reinterpret_cast<float*>(&_shared_mem_preprocess);
 
@@ -1218,11 +1218,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
             const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
-            const unsigned backwards_preprocess_shared_mem_size = (
-                cdiv(v_dim, 32)
-            ) * sizeof(float);
-
-            backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block, backwards_preprocess_shared_mem_size>>>(
+            backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block>>>(
                 ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
                 ACCESSOR(delta, 3, scalar_t)
