@@ -22,8 +22,8 @@ except ImportError:
 
 # constants
 
-ALLOWED_QK_DIMS = (64,)
-ALLOWED_V_DIMS = (64,)
+ALLOWED_DIMS = (64,)
+ALLOWED_HALF_DIMS = (64,)
 
 # helper functions
 
@@ -52,7 +52,7 @@ def l2norm(t):
 def plain_cosine_sim_attention(
     q: TensorType['b', 'h', 'i', 'd'],
     k: TensorType['b', 'h', 'j', 'd'],
-    v: TensorType['b', 'h', 'j', 'e'],
+    v: TensorType['b', 'h', 'j', 'd'],
     mask: Optional[TensorType['b', 'j']] = None,
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
@@ -60,7 +60,7 @@ def plain_cosine_sim_attention(
     l2norm_qk = True,
     attn_bias_batch_dim = False
 
-) -> TensorType['b', 'h', 'i', 'e']:
+) -> TensorType['b', 'h', 'i', 'd']:
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
@@ -100,12 +100,13 @@ class FlashCosineSimAttention(Function):
         causal,
         attn_bias_batch_dim
     ):
-        qk_dim, v_dim = q.shape[-1], v.shape[-1]
+        batch, heads, seq, dim_qk, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
+        assert dim_qk == dim, 'query / key head dimension must be equal to value head dimension for now'
 
-        assert (qk_dim in ALLOWED_QK_DIMS), f'query key dimension must be one of {ALLOWED_QK_DIMS}'
-        assert (v_dim in ALLOWED_V_DIMS), f'value dimension must be one of {ALLOWED_V_DIMS}'
+        is_half = dtype == torch.float16
 
-        batch, heads, seq, _, dim, device, dtype = *q.shape, v.shape[-1], q.device, q.dtype
+        assert is_half or (dim in ALLOWED_DIMS), f'query key dimension must be one of {ALLOWED_DIMS}'
+        assert (not is_half) or (dim in ALLOWED_HALF_DIMS), f'half dimensions must be one of {ALLOWED_HALF_DIMS}'
 
         mask = default(mask, lambda: torch.empty(q.shape[0], 0, device = q.device, dtype = torch.bool))
 
@@ -172,14 +173,14 @@ class FlashCosineSimAttention(Function):
 def flash_cosine_sim_attention(
     q: TensorType['b', 'h', 'i', 'd'],
     k: TensorType['b', 'h', 'j', 'd'],
-    v: TensorType['b', 'h', 'j', 'e'],
+    v: TensorType['b', 'h', 'j', 'd'],
     mask: Optional[TensorType['b', 'j']] = None,
     attn_bias: Optional[TensorType['h', 'i', 'j']] = None,
     scale = 10,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False
-) -> TensorType['b', 'h', 'i', 'e']:
+) -> TensorType['b', 'h', 'i', 'd']:
 
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 

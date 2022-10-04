@@ -18,8 +18,7 @@ def allclose(a, b, atol = 1e-4):
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('qk_dim_head', [64])
-@pytest.mark.parametrize('v_dim_head', [64])
+@pytest.mark.parametrize('dim_head', [64])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
 def test_output_equal(
@@ -27,17 +26,16 @@ def test_output_equal(
     mask,
     attn_bias,
     seq_len,
-    qk_dim_head,
-    v_dim_head,
+    dim_head,
     float16,
     attn_bias_batch_dim
 ):
     batch, heads = 4, 8
     dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
 
-    q = torch.randn(batch, heads, seq_len, qk_dim_head, dtype = dtype).cuda()
-    k = torch.randn(batch, heads, seq_len, qk_dim_head, dtype = dtype).cuda()
-    v = torch.randn(batch, heads, seq_len, v_dim_head, dtype = dtype).cuda()
+    q = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
+    k = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
+    v = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
 
     attn_mask = torch.randint(0, 2, (batch, seq_len), dtype = torch.bool).cuda() if mask else None
     bias = torch.randn(batch if attn_bias_batch_dim else heads, seq_len, seq_len, dtype = dtype).cuda() if attn_bias else None
@@ -51,8 +49,7 @@ def test_output_equal(
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('qk_dim_head', [64])
-@pytest.mark.parametrize('v_dim_head', [64])
+@pytest.mark.parametrize('dim_head', [64])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
 def test_grad_equal(
@@ -60,17 +57,16 @@ def test_grad_equal(
     mask,
     attn_bias,
     seq_len,
-    qk_dim_head,
-    v_dim_head,
+    dim_head,
     float16,
     attn_bias_batch_dim
 ):
     batch, heads = 4, 8
     dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
 
-    q = torch.randn(batch, heads, seq_len, qk_dim_head).cuda().requires_grad_()
-    k = torch.randn(batch, heads, seq_len, qk_dim_head).cuda().requires_grad_()
-    v = torch.randn(batch, heads, seq_len, v_dim_head).cuda().requires_grad_()
+    q = torch.randn(batch, heads, seq_len, dim_head).cuda().requires_grad_()
+    k = torch.randn(batch, heads, seq_len, dim_head).cuda().requires_grad_()
+    v = torch.randn(batch, heads, seq_len, dim_head).cuda().requires_grad_()
 
     attn_mask = torch.randint(0, 2, (batch, seq_len), dtype = torch.bool).cuda() if mask else None
     bias = torch.randn(batch if attn_bias_batch_dim else heads, seq_len, seq_len).cuda().requires_grad_() if attn_bias else None
