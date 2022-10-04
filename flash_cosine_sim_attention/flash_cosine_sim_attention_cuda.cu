@@ -449,7 +449,13 @@ namespace mma {
         __device__ void zero() {
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
-                wmma::fill_fragment(C_frag[i], __float2half(0.f));
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    #pragma unroll
+                    for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
+                        C_frag[i * M_thread + j].x[k] = (c10::Half) 0.f;
+                    }
+                }
             }
         }
 
