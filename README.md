@@ -10,7 +10,7 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - Backwards kernel is still 3x slower, 1.5x slower for autoregressive
 
-- Thanks for Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
+- Thanks to Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
 
 - All tests now pass for F16 and the transformer trains! Big thanks to Arthur 🙏
 

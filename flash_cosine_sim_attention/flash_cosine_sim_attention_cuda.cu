@@ -1,13 +1,13 @@
+#include <cassert>
+#include <type_traits>
+
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <cassert>
-
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
-#include <type_traits>
 #include <ATen/Dispatch.h>
-#include<mma.h>
+#include <mma.h>
 
 // error handler
 // from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
@@ -199,6 +199,19 @@ namespace mem {
         __device__ char* next() {
             return reinterpret_cast<char*>(smem + size);
         }
+
+        // allow for storing rows
+
+        template<typename accessor, typename F>
+        __device__ void store_row(accessor gmem, int row_offset, int row_tile_size, int row_max, F&& op) {
+            for (int i = threadIdx.x; i < row_tile_size; i += blockDim.x) {
+                int global_row = row_offset + i;
+
+                if (global_row < row_max) {
+                    smem[i] = op(gmem[global_row]);
+                }
+            }
+        }
     };
 }
 
@@ -289,7 +302,7 @@ namespace mma {
             warp_x = (warp_id % M_block);
             warp_y = (warp_id / M_block);
 
-            int lane_id = threadIdx.x % 32;
+            int lane_id = threadIdx.x & 31;
             thread_x = warp_x * M_warp * M_thread + lane_id % M_warp;
             thread_y = warp_y * N_warp * N_thread + lane_id / M_warp;
         }
@@ -367,6 +380,14 @@ namespace mma {
                     C_sm(i * N_warp + thread_y, j * M_warp + thread_x) = C_frag[i * M_thread + j];
                 }
             }
+        }
+
+        // Stream C from registers to global memory using temporary shared memory buffer
+        template<typename accessor, typename shared_fragment>
+        __device__ void store(accessor gmem, shared_fragment& smem, int tile_x, int tile_y, int max_x, int max_y) {
+            store(smem);
+            __syncthreads();
+            smem.store(gmem, tile_x, tile_y, max_x, max_y);
         }
 
         // atomic add C from registers to gmem
@@ -471,8 +492,11 @@ namespace mma {
         __device__ int get_warp_row(int i) {
             int tid = threadIdx.x % 32;
             #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
-                return (tid & 3) + ((tid & 4) << 1) + ((tid & 16) >> 2); // half
-                //return (tid & 16) / 4 + 2 * (tid & 4) + (tid & 1) + (i & 2); // float
+                if (std::is_same<output_t, half>::value) {
+                    return (tid & 3) + ((tid & 4) << 1) + ((tid & 16) >> 2);
+                } else {
+                    return (tid & 16) / 4 + 2 * (tid & 4) + (tid & 1) + (i & 2);
+                }
             #else
                 return (i & 2) * 4 + tid / 4;
             #endif
@@ -481,8 +505,11 @@ namespace mma {
         __device__ int get_warp_col(int i) {
             int tid = threadIdx.x % 32;
             #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
-                return (i & 7) + (tid & 8); // half
-                //return (tid & 10) + (i & 5); // float
+                if (std::is_same<output_t, half>::value) {
+                    return (i & 7) + (tid & 8);
+                } else {
+                    return (tid & 10) + (i & 5);
+                }
             #else
                 return (tid % 4) * 2 + i % 2 + (i & 4) * 2;
             #endif
@@ -513,6 +540,14 @@ namespace mma {
                     wmma::store_matrix_sync(reinterpret_cast<half*>(&C_sm(y, x)), C_frag[i * M_thread + j], shared_fragment::stride, wmma::mem_col_major);
                 }
             }
+        }
+
+        // Stream C from registers to global memory using temporary shared memory buffer
+        template<typename accessor, typename shared_fragment>
+        __device__ void store(accessor gmem, shared_fragment& smem, int tile_x, int tile_y, int max_x, int max_y) {
+            store(smem);
+            __syncthreads();
+            smem.store(gmem, tile_x, tile_y, max_x, max_y);
         }
 
         // atomic add C from registers to gmem
@@ -677,11 +712,7 @@ __global__ void forward_kernel(
 
     L_acc.divide(L_sm.smem, out_mma);
 
-    out_mma.store(O_sm);
-
-    __syncthreads();
-
-    O_sm.store(O_, 0, row_tile_offset, 0, row_seq_len);
+    out_mma.store(O_, O_sm, 0, row_tile_offset, 0, row_seq_len);
 }
 
 // backward kernel
@@ -707,7 +738,7 @@ __global__ void backward_preprocess(
     const int dim_idx = threadIdx.x;
 
     const int warp_id = threadIdx.x / 32;
-    const int lane_id = threadIdx.x & 31;
+    const int lane_id = threadIdx.x % 32;
 
     const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
 
@@ -900,14 +931,11 @@ __global__ void backward_kernel(
 
         // load rowsums
 
-        for (int i = threadIdx.x; i < row_tile_size; i++) {
-            int global_row = row_tile_offset + i;
+        __syncthreads();
 
-            if (global_row >= row_seq_len)
-                continue;
-
-            L_sm.smem[i] = 1.f / max(l_[global_row], 1e-10);
-        }
+        L_sm.store_row(l_, row_tile_offset, row_tile_size, row_seq_len, [&](float el) {
+            return 1.f / max(el, 1e-10);
+        });
 
         __syncthreads();
 
@@ -957,14 +985,9 @@ __global__ void backward_kernel(
 
         // load pre-calculated delta
 
-        for (int i = threadIdx.x; i < row_tile_size; i++) {
-            int global_row = row_tile_offset + i;
+        __syncthreads();
 
-            if (global_row >= row_seq_len)
-                continue;
-
-            D_sm.smem[i] = delta_[global_row];
-        }
+        D_sm.store_row(delta_, row_tile_offset, row_tile_size, row_seq_len, [=](scalar_t el) {return el;});
 
         __syncthreads();
 
@@ -1022,27 +1045,19 @@ __global__ void backward_kernel(
         dq_mma.atomic_add(dq_, row_tile_offset, 0, row_seq_len, dim_qk);
     }
 
-    dv_mma.store(DV_sm);
+    dv_mma.store(dv_, DV_sm, 0, col_tile_offset, 0, col_seq_len);
 
     __syncthreads();
 
-    DV_sm.store(dv_, 0, col_tile_offset, 0, col_seq_len);
-
-    __syncthreads();
-
-    dk_mma.store(DK_sm);
-
-    __syncthreads();
-
-    DK_sm.store(dk_, 0, col_tile_offset, 0, col_seq_len);
+    dk_mma.store(dk_, DK_sm, 0, col_tile_offset, 0, col_seq_len);
 }
 
 // forwards c++ function
 
 std::vector<at::Tensor> flash_cosine_sim_attention_forward(
-    torch::Tensor Q,
-    torch::Tensor K,
-    torch::Tensor V,
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
     torch::Tensor mask,
     torch::Tensor attn_bias,
     bool attn_bias_batch_dim,
@@ -1050,21 +1065,21 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     bool causal,
     bool need_store_rowsum
 ) {
-    auto q_scalar_type = Q.scalar_type();
-    auto query_device = device_of(Q);
+    auto q_scalar_type = q.scalar_type();
+    auto query_device = device_of(q);
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
-    const int batch = Q.size(0);
-    const int heads = Q.size(1);
-    const int q_seq_len = Q.size(2);
-    const int k_seq_len = K.size(2);
-    const int k_dim = Q.size(3);
-    const int v_dim = V.size(3);
+    const int batch = q.size(0);
+    const int heads = q.size(1);
+    const int q_seq_len = q.size(2);
+    const int k_seq_len = k.size(2);
+    const int k_dim = q.size(3);
+    const int v_dim = v.size(3);
 
     auto options = torch::TensorOptions().device(query_device);
 
-    auto O = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
-    auto L = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
+    auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
+    auto l = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
 
     const int max_feature_dimension = max(k_dim, v_dim);
 
@@ -1073,7 +1088,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     const dim3 threads_per_block(256);
 
-    AT_TYPE_DISPATCH_SWITCH(Q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+    AT_TYPE_DISPATCH_SWITCH(q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
 
             const dim3 blocks(
@@ -1083,11 +1098,11 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
             );
 
             forward_kernel<scalar_t><<<blocks, threads_per_block>>>(
-                ACCESSOR(Q, 4, scalar_t),
-                ACCESSOR(K, 4, scalar_t),
-                ACCESSOR(V, 4, scalar_t),
-                ACCESSOR(O, 4, scalar_t),
-                ACCESSOR(L, 3, float),
+                ACCESSOR(q, 4, scalar_t),
+                ACCESSOR(k, 4, scalar_t),
+                ACCESSOR(v, 4, scalar_t),
+                ACCESSOR(o, 4, scalar_t),
+                ACCESSOR(l, 3, float),
                 ACCESSOR(mask, 2, bool),
                 ACCESSOR(attn_bias, 3, scalar_t),
                 scale,
@@ -1107,7 +1122,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     CHECK_LAST_CUDA_ERROR();
 
-    return { O, L };
+    return { o, l };
 }
 
 // backwards c++ function
@@ -1210,7 +1225,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     CHECK_LAST_CUDA_ERROR();
 
-    return {dq, dk, dv, db};
+    return { dq, dk, dv, db };
 }
 
 // bind
