@@ -1098,6 +1098,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 ) {
     auto q_scalar_type = q.scalar_type();
     auto query_device = device_of(q);
+
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
     const int batch = q.size(0);
@@ -1112,15 +1113,13 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
     auto l = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
 
-    const int max_feature_dimension = max(k_dim, v_dim);
-
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
 
     const int tile_size = 64;
     const dim3 threads_per_block(256);
 
-    AT_TYPE_DISPATCH_SWITCH(q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
 
             const dim3 blocks(
@@ -1173,6 +1172,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     bool causal,
     bool attn_bias_requires_grad
 ) {
+    auto q_scalar_type = q.scalar_type();
     auto query_device = device_of(q);
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
@@ -1187,7 +1187,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
 
-    auto options = torch::TensorOptions().device(query_device).dtype(q.scalar_type());
+    auto options = torch::TensorOptions().device(query_device).dtype(q_scalar_type);
 
     // setup dq, dk, dv
 
@@ -1208,7 +1208,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     const int tile_size = 64;
     const dim3 backwards_threads_per_block(256);
 
-    AT_TYPE_DISPATCH_SWITCH(q.scalar_type(), scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
 
             const dim3 backwards_blocks(
