@@ -1118,12 +1118,13 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     // setup threads per block
 
     const int tile_size = 64;
-    const dim3 threads_per_block(256);
 
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
+
+            const dim3 threads_per_block(256);
 
             const dim3 blocks(
                 cdiv(q_seq_len, tile_size),
@@ -1205,13 +1206,14 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // setup threads per block
 
     const int tile_size = 64;
-    const dim3 backwards_preprocess_threads_per_block(v_dim);
-    const dim3 backwards_threads_per_block(256);
 
     // setup backwards call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
+
+            const dim3 backwards_preprocess_threads_per_block(dim_head);
+            const dim3 backwards_threads_per_block(256);
 
             const dim3 backwards_blocks(
                 batch * heads,
