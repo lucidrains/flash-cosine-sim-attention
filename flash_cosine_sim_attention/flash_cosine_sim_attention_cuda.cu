@@ -6,9 +6,6 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
-#include <ATen/Dispatch.h>
-#include <mma.h>
-
 // error handler
 // from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
 
@@ -36,16 +33,15 @@ __host__ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
 
-__host__ __device__ int next_multiple_of(int num, int multiple_of) {
-    return cdiv(num, multiple_of) * multiple_of;
-}
-
 // Custom dispatch inspired from
 // https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
 // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
 // https://github.com/swansontec/map-macro
 
 // Macro utilities:
+
+#include <ATen/Dispatch.h>
+
 #define REMOVE_PAREN_IMPL(...) __VA_ARGS__
 #define REMOVE_PAREN(args) REMOVE_PAREN_IMPL args
 
@@ -267,6 +263,8 @@ struct rowsum_accumulator {
 };
 
 // warp tile, done by @ahennequ Arthur Hennequin
+
+#include <mma.h>
 
 namespace mma {
     template<typename scalar_t>
@@ -579,7 +577,7 @@ namespace mma {
 
 // forward kernel
 
-template <typename scalar_t>
+template <typename scalar_t, int tile_size>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> Q,
     const PackedAccessor<scalar_t, 4> K,
@@ -612,15 +610,15 @@ __global__ void forward_kernel(
     using QK_mma_t  = mma::warp_tile<scalar_t>;
     using out_mma_t = mma::warp_tile<scalar_t>;
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
-    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, out_mma_t::M_tile>;
-    using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
-    using mask_sm_t = mem::shared_fragment<bool, 2, QK_mma_t::M_tile>;
-    using L_sm_t = mem::shared_fragment<float, QK_mma_t::N_tile, 1>;
-    using O_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, out_mma_t::M_tile>;
+    using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
+    using mask_sm_t = mem::shared_fragment<bool, 2, tile_size>;
+    using L_sm_t = mem::shared_fragment<float, tile_size, 1>;
+    using O_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
 
-    const int row_tile_offset = blockIdx.x * QK_mma_t::N_tile;
+    const int row_tile_offset = blockIdx.x * tile_size;
 
     // registers
 
@@ -660,8 +658,8 @@ __global__ void forward_kernel(
 
     // renamed vars
 
-    auto col_tile_size = QK_mma_t::M_tile;
-    auto row_tile_size = QK_mma_t::N_tile;
+    auto col_tile_size = tile_size;
+    auto row_tile_size = tile_size;
 
     // loop over column tiles
 
@@ -742,7 +740,7 @@ __global__ void forward_kernel(
 
 // done by @ptillet at https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
 
-template <typename scalar_t>
+template <typename scalar_t, int dim_head>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
@@ -767,7 +765,7 @@ __global__ void backward_preprocess(
 
     // shared memory
 
-    __shared__ float _shared_mem_preprocess[64 / 32];
+    __shared__ float _shared_mem_preprocess[dim_head / 32];
 
     float* sm_delta  = reinterpret_cast<float*>(&_shared_mem_preprocess);
 
@@ -780,7 +778,7 @@ __global__ void backward_preprocess(
     // load do_scaled * o into registers
 
     if (dim_idx < v_dim)
-        val = do_[dim_idx] * o_[dim_idx];
+        val = do_[dim_idx] * o_[dim_idx]; // todo: do the trick where one reduction step is taken
 
     // warp shuffle reduce
 
@@ -797,6 +795,7 @@ __global__ void backward_preprocess(
         return;
 
     // use shared memory to reduce further across warps
+
     if (dim_idx < (blockDim.x / 32)) {
         val = sm_delta[lane_id];
     } else {
@@ -807,7 +806,7 @@ __global__ void backward_preprocess(
         val += __shfl_down_sync(mask, val, offset);
     }
 
-    // write out reduced rowsum(do_scaled * o)
+    // write out reduced rowsum(do * o)
 
     if (dim_idx != 0)
         return;
@@ -817,7 +816,7 @@ __global__ void backward_preprocess(
 
 // main backward kernel
 
-template <typename scalar_t>
+template <typename scalar_t, int tile_size>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -869,17 +868,17 @@ __global__ void backward_kernel(
 
     // shared memory
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
-    using L_sm_t = mem::shared_fragment<float, 1, QK_mma_t::N_tile>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using L_sm_t = mem::shared_fragment<float, 1, tile_size>;
     using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, dV_mma_t::M_tile>;
-    using D_sm_t = mem::shared_fragment<scalar_t, 1, QK_mma_t::N_tile>;
+    using D_sm_t = mem::shared_fragment<scalar_t, 1, tile_size>;
 
-    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::M_tile>;
-    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, QK_mma_t::N_tile>;
+    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
 
-    using C_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, QK_mma_t::M_tile>;
-    using DK_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, dK_mma_t::M_tile>;
-    using DV_sm_t = mem::shared_fragment<scalar_t, QK_mma_t::N_tile, dV_mma_t::M_tile>;
+    using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
+    using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dK_mma_t::M_tile>;
+    using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dV_mma_t::M_tile>;
     using mask_sm_t = mem::shared_fragment<bool, 1, dV_mma_t::M_tile>;
 
     __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
@@ -922,8 +921,8 @@ __global__ void backward_kernel(
 
     // tiles
 
-    auto col_tile_size = QK_mma_t::M_tile;
-    auto row_tile_size = QK_mma_t::N_tile;
+    auto col_tile_size = tile_size;
+    auto row_tile_size = tile_size;
 
     int col_tile_offset = blockIdx.y * col_tile_size;
 
@@ -1116,11 +1115,15 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     const bool has_attn_bias = !!attn_bias.numel();
     const bool has_mask = !!mask.numel();
 
+    // setup threads per block
+
     const int tile_size = 64;
     const dim3 threads_per_block(256);
 
+    // dispatch forward call
+
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
 
             const dim3 blocks(
                 cdiv(q_seq_len, tile_size),
@@ -1128,7 +1131,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
                 heads
             );
 
-            forward_kernel<scalar_t><<<blocks, threads_per_block>>>(
+            forward_kernel<scalar_t, tile_size><<<blocks, threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
@@ -1199,17 +1202,16 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias) : at::empty({attn_bias.size(0), 0, 0}, options);
 
-    // setup backwards preprocess call
+    // setup threads per block
 
-    const dim3 backwards_preprocess_threads_per_block(next_multiple_of(v_dim, 32));
+    const int tile_size = 64;
+    const dim3 backwards_preprocess_threads_per_block(v_dim);
+    const dim3 backwards_threads_per_block(256);
 
     // setup backwards call
 
-    const int tile_size = 64;
-    const dim3 backwards_threads_per_block(256);
-
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        VALUE_DISPATCH_SWITCH(v_dim, out_dim, (64), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
 
             const dim3 backwards_blocks(
                 batch * heads,
@@ -1218,13 +1220,13 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
             const dim3 backwards_preprocess_blocks(batch * heads, seq);
 
-            backward_preprocess<scalar_t><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block>>>(
+            backward_preprocess<scalar_t, dim_head><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block>>>(
                 ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
                 ACCESSOR(delta, 3, scalar_t)
             );
 
-            backward_kernel<scalar_t><<<backwards_blocks, backwards_threads_per_block>>>(
+            backward_kernel<scalar_t, tile_size><<<backwards_blocks, backwards_threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
