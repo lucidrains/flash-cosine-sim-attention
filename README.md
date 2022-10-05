@@ -25,8 +25,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 - [ ] support dimensions of multiples of 16 for query keys and values up to 96 - 128 reserved for A100s
 - [ ] support O(n) 1d dynamic positional bias
-- [ ] fix attention bias gradients
 
+- [x] fix attention bias gradients
 - [x] allow for single-headed key / values, as in PaLM
 - [x] fix atomic add for f16
 - [x] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
