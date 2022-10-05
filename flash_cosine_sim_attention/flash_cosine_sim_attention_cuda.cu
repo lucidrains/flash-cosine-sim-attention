@@ -775,7 +775,7 @@ template <typename scalar_t, int dim_head>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-          PackedAccessor<scalar_t, 3> delta
+          PackedAccessor<float, 3> delta
 ) {
     const int heads = o.size(1);
     const int v_dim = o.size(3);
@@ -860,7 +860,7 @@ __global__ void backward_kernel(
           PackedAccessor<float, 4> dv,
           PackedAccessor<float, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out_scaled,
-    const PackedAccessor<scalar_t, 3> delta,
+    const PackedAccessor<float, 3> delta,
     const float scale,
     const bool causal,
     const bool has_mask,
@@ -912,7 +912,6 @@ __global__ void backward_kernel(
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
     using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dK_mma_t::M_tile>;
     using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dV_mma_t::M_tile>;
-    using mask_sm_t = mem::shared_fragment<bool, 1, dV_mma_t::M_tile>;
 
     __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
 
@@ -926,7 +925,6 @@ __global__ void backward_kernel(
     V_sm_t V_sm{Q_sm.next()};
     D_sm_t D_sm{K_sm.next()};
     C_sm_t C_sm{D_sm.next()};
-    mask_sm_t mask_sm{D_sm.next()};
     DK_sm_t DK_sm{D_sm.next()};
     DV_sm_t DV_sm{D_sm.next()};
 
@@ -984,16 +982,9 @@ __global__ void backward_kernel(
 
         // load rowsums
 
-        __syncthreads();
-
         L_sm.store_row(l_, row_tile_offset, row_tile_size, row_seq_len, [&](float el) {
             return 1.f / max(el, 1e-10);
         });
-
-        // store mask into smem if needed
-
-        if (has_mask)
-            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len, [](bool el) {return el;});
 
         __syncthreads();
 
@@ -1006,16 +997,13 @@ __global__ void backward_kernel(
             if ((attn_col >= col_seq_len) ||
                 (attn_row >= row_seq_len) ||
                 (causal && ((attn_col - seq_len_diff) > attn_row)) ||
-                (has_mask && !mask_sm.smem[col]))
+                (has_mask && !mask_[attn_col]))
                 return 0.f;
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
             return __expf(scale * el + bias - scale) * L_sm.smem[row];
         });
-
-        if (has_mask)
-            __syncthreads();
 
         QK_mma.store(C_sm);
 
@@ -1240,7 +1228,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     auto options = torch::TensorOptions().device(query_device);
 
-    auto delta = at::empty({batch, heads, seq}, options.dtype(q_scalar_type));
+    auto delta = at::empty({batch, heads, seq}, options.dtype(torch::kFloat));
 
     auto dq = at::zeros_like(q, options.dtype(torch::kFloat));
     auto dk = at::zeros_like(k, options.dtype(torch::kFloat));
@@ -1270,7 +1258,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             backward_preprocess<scalar_t, dim_head><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block>>>(
                 ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(delta, 3, scalar_t)
+                ACCESSOR(delta, 3, float)
             );
 
             backward_kernel<scalar_t, tile_size><<<backwards_blocks, backwards_threads_per_block>>>(
@@ -1285,7 +1273,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(dv, 4, float),
                 ACCESSOR(db, 3, float),
                 ACCESSOR(d_out, 4, scalar_t),
-                ACCESSOR(delta, 3, scalar_t),
+                ACCESSOR(delta, 3, float),
                 scale,
                 causal,
                 has_mask,

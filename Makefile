@@ -5,6 +5,9 @@ install:
 test: install
 	python setup.py test
 
+test_new: install
+	python test_new.py
+
 benchmark: install
 	python benchmark.py
 
