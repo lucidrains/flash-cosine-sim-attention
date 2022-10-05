@@ -16,6 +16,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - There is a bug with the atomicAdd for dQ for F16, so F16 is still not safe for use
 
+- F16 is now fixed for dQ with a hack, but performance is no longer that great (1.3-3x slower on f16)
+
 ## Todo
 
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
