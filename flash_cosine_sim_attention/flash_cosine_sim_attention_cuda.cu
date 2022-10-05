@@ -432,8 +432,10 @@ namespace mma {
         static constexpr int M_tile = M_warp * M_block * M_thread;
         static constexpr int K_tile = 16;
 
+        using output_t = half;
+
         // Registers:
-        wmma::fragment<wmma::accumulator, 16, 16, 16, half> C_frag[N_thread * M_thread];
+        wmma::fragment<wmma::accumulator, 16, 16, 16, output_t> C_frag[N_thread * M_thread];
 
         int warp_x;   // x offset of the warp within the block tile
         int warp_y;   // y offset of the warp within the block tile
