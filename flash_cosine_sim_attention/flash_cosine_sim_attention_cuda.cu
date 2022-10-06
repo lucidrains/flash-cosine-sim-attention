@@ -211,6 +211,11 @@ namespace layout {
         static constexpr int TPB = 256;
     };
 
+    template<>
+    struct tpb<c10::Half, 32> {
+        static constexpr int TPB = 128;
+    };
+
     // shared memory sizes that depends on layout, if needed
 
     template<typename scalar_t, int dim_head>
@@ -291,6 +296,48 @@ namespace layout {
         // constraints
         static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
         static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 64>::TPB);
+
+        static_assert(N_thread * N_warp * N_block == 64);
+        static_assert(M_thread * M_warp * M_block == 64);
+    };
+
+    template<>
+    struct warp<c10::Half, 32, 64, 32> {
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 1;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 2;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 32>::TPB);
+
+        static_assert(N_thread * N_warp * N_block == 64);
+        static_assert(M_thread * M_warp * M_block == 32);
+    };
+
+    template<>
+    struct warp<c10::Half, 32, 64, 64> {
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 2;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 2;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 32>::TPB);
 
         static_assert(N_thread * N_warp * N_block == 64);
         static_assert(M_thread * M_warp * M_block == 64);
@@ -661,9 +708,20 @@ __global__ void forward_kernel(
     const int dim_qk = q.size(3);
 
     constexpr int chunk_size = 16;
+    const int row_tile_offset = blockIdx.x * tile_size;
+
+    // registers
 
     using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, tile_size, tile_size>;
     using out_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
+
+    float bias;
+
+    QK_mma_t  QK_mma;
+    out_mma_t out_mma;
+    rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t> L_acc;
+
+    // shared memoery
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
@@ -672,20 +730,7 @@ __global__ void forward_kernel(
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 2, tile_size>;
     using L_sm_t = mem::shared_fragment<float, tile_size, 1>;
-    using O_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
-
-    const int row_tile_offset = blockIdx.x * tile_size;
-
-    // registers
-
-    float bias;
-
-    QK_mma_t  QK_mma;
-    out_mma_t out_mma;
-
-    rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t> L_acc;
-
-    // shared memory
+    using O_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
 
     __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
 
@@ -698,9 +743,6 @@ __global__ void forward_kernel(
     L_sm_t L_sm{K_sm.next()};
     O_sm_t O_sm{K_sm.next()};
     mask_sm_t mask_sm{K_sm.next()};
-
-    out_mma.zero();
-    L_acc.zero();
 
     // shortcut accessors
 
@@ -716,6 +758,11 @@ __global__ void forward_kernel(
 
     auto col_tile_size = tile_size;
     auto row_tile_size = tile_size;
+
+    // zero accumulators
+
+    out_mma.zero();
+    L_acc.zero();
 
     // loop over column tiles
 
@@ -931,15 +978,16 @@ __global__ void backward_kernel(
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using L_sm_t = mem::shared_fragment<float, 1, tile_size>;
-    using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, dV_mma_t::M_tile>;
     using D_sm_t = mem::shared_fragment<scalar_t, 1, tile_size>;
 
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
-    using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dK_mma_t::M_tile>;
-    using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dV_mma_t::M_tile>;
+
+    using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
+    using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
 
     __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
 
@@ -1181,7 +1229,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64, 32), (
 
             const int tile_size = 64;
 
@@ -1271,7 +1319,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // setup backwards call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64, 32), (
 
             const int tile_size = 64;
 

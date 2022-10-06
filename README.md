@@ -27,6 +27,7 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [ ] support O(n) 1d dynamic positional bias
 - [ ] bfloat16 support
 - [ ] flexible which type is used for accumulation
+- [ ] debug and fix bias backwards gradients yet again for head size of 32
 
 - [x] fix attention bias gradients
 - [x] allow for single-headed key / values, as in PaLM
@@ -38,13 +39,8 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 ## Supported head dimensions (wip)
 
-- [ ] 32 - f32 forwards - in progress
-- [ ] 32 - f32 backwards - in progress
-- [ ] 32 - f16 forwards - in progress
-- [ ] 32 - f16 backwards - in progress
-
-- [x] 64 - forwards
-- [x] 64 - backwards
+- [x] 32
+- [x] 64
 
 - [ ] 96 - f32 forwards
 - [ ] 96 - f32 backwards

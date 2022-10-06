@@ -11,6 +11,10 @@ def not_nan_or_infs(t):
 
 def allclose(a, b, atol = 1e-4):
     diff = (a - b).abs().amax()
+
+    if torch.any(diff > atol):
+        print(f'diff: {diff}')
+
     return diff <= atol
 
 # tests
@@ -18,7 +22,7 @@ def allclose(a, b, atol = 1e-4):
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('dim_head', [64])
+@pytest.mark.parametrize('dim_head', [64, 32])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
 @pytest.mark.parametrize('single_head_kv', [False, True])
@@ -53,7 +57,7 @@ def test_output_equal(
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('dim_head', [64])
+@pytest.mark.parametrize('dim_head', [64, 32])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
 @pytest.mark.parametrize('single_head_kv', [False, True])
@@ -104,9 +108,9 @@ def test_grad_equal(
 
     assert allclose(dv, fdv, atol = atol)
 
+    assert allclose(dk, fdk, atol = atol)
+    assert allclose(dq, fdq, atol = atol)
+
     if attn_bias:
         assert not_nan_or_infs(fdb)
         assert allclose(db, fdb, atol = atol)
-
-    assert allclose(dk, fdk, atol = atol)
-    assert allclose(dq, fdq, atol = atol)

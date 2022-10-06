@@ -21,8 +21,8 @@ except ImportError:
 
 # constants
 
-ALLOWED_DIMS = (64,)
-ALLOWED_HALF_DIMS = (64,)
+ALLOWED_DIMS = (64, 32)
+ALLOWED_HALF_DIMS = (64, 32)
 
 # helper functions
 
