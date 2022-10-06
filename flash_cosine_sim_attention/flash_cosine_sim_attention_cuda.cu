@@ -721,7 +721,7 @@ __global__ void forward_kernel(
     out_mma_t out_mma;
     rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t> L_acc;
 
-    // shared memoery
+    // shared memory
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
@@ -985,6 +985,7 @@ __global__ void backward_kernel(
     using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
+    using mask_sm_t = mem::shared_fragment<bool, 1, tile_size>;
 
     using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
     using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
@@ -1000,7 +1001,10 @@ __global__ void backward_kernel(
     K_sm_t K_sm{Q_sm.next()};
     V_sm_t V_sm{Q_sm.next()};
     D_sm_t D_sm{K_sm.next()};
+
     C_sm_t C_sm{D_sm.next()};
+    mask_sm_t mask_sm{D_sm.next()};
+
     DK_sm_t DK_sm{D_sm.next()};
     DV_sm_t DV_sm{D_sm.next()};
 
@@ -1056,11 +1060,14 @@ __global__ void backward_kernel(
             __syncthreads();
         }
 
-        // load rowsums
+        // load rowsums and mask if needed
 
         L_sm.store_row(l_, row_tile_offset, row_tile_size, row_seq_len, [&](float el) {
             return 1.f / max(el, 1e-10);
         });
+
+        if (has_mask)
+            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len, [](float el) {return el;});
 
         __syncthreads();
 
@@ -1073,7 +1080,7 @@ __global__ void backward_kernel(
             if ((attn_col >= col_seq_len) ||
                 (attn_row >= row_seq_len) ||
                 (causal && ((attn_col - seq_len_diff) > attn_row)) ||
-                (has_mask && !mask_[attn_col]))
+                (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
             if (causal && seq_len_diff == 0 && attn_row == 0 && attn_col == 0)
@@ -1083,6 +1090,9 @@ __global__ void backward_kernel(
 
             return __expf(scale * el + bias - scale) * L_sm.smem[row];
         });
+
+        if (has_mask)
+            __syncthreads();
 
         QK_mma.store(C_sm);
 
