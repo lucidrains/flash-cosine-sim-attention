@@ -892,6 +892,14 @@ __global__ void backward_preprocess(
         val += __shfl_down_sync(mask, val, offset);
     }
 
+    if (dim_head <= 32) {
+        // if dimension of head is 32, no need to reduce across shared memory
+        if (dim_idx == 0)
+            delta_[seq_idx] = (scalar_t) val;
+
+        return;
+    }
+
     if (lane_id == 0)
         sm_delta[warp_id] = val;
 
