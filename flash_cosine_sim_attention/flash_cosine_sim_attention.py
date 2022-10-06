@@ -21,8 +21,8 @@ except ImportError:
 
 # constants
 
-ALLOWED_DIMS = (64, 32)
-ALLOWED_HALF_DIMS = (64, 32)
+ALLOWED_DIMS = (32, 64, 128)
+ALLOWED_HALF_DIMS = (32, 64, 128)
 
 # helper functions
 
@@ -157,6 +157,8 @@ class FlashCosineSimAttention(Function):
         assert ctx.should_backwards
 
         o, l, q, k, v, mask, attn_bias = ctx.saved_tensors
+
+        assert not exists(attn_bias) or q.shape[-1] == 128
 
         batch, heads, src_seq, tgt_seq, device, dtype = *q.shape[:3], k.shape[2], q.device, q.dtype
 

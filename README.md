@@ -47,9 +47,9 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [ ] 96 - f16 forwards
 - [ ] 96 - f16 backwards
 
-- [ ] 128 - f32 forwards
+- [x] 128 - f32 forwards
 - [ ] 128 - f32 backwards
-- [ ] 128 - f16 forwards
+- [x] 128 - f16 forwards
 - [ ] 128 - f16 backwards
 
 ## Appreciation

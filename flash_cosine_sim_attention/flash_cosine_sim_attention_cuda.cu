@@ -218,14 +218,40 @@ namespace layout {
 
     // shared memory sizes that depends on layout, if needed
 
-    template<typename scalar_t, int dim_head>
+    template<typename scalar_t, int tile_size, int dim_head>
     struct smem {
-        static constexpr int size = 0; // figure out later
+        static constexpr int chunk_size = 16;
+
+        static constexpr int forward_size = (
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, tile_size, tile_size>::size      // c
+        );
+
+        static constexpr int backward_size = (
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // q
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // k
+            mem::shared_fragment<scalar_t, tile_size, tile_size>::size +     // c
+            mem::shared_fragment<scalar_t, 1, tile_size>::size               // d
+        );
     };
 
-    template<int dim_head>
-    struct smem<c10::Half, dim_head> {
-        static constexpr int size = 0;
+    template<typename scalar_t, int tile_size>
+    struct smem<scalar_t, tile_size, 128> {
+        static constexpr int chunk_size = 16;
+
+        static constexpr int forward_size = (
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, tile_size, 128>::size       // c
+        );
+
+        static constexpr int backward_size = (
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // q
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // k
+            mem::shared_fragment<scalar_t, tile_size, tile_size>::size +     // c
+            mem::shared_fragment<scalar_t, 1, tile_size>::size               // d
+        );
     };
 
     // f32
@@ -732,7 +758,7 @@ __global__ void forward_kernel(
     using L_sm_t = mem::shared_fragment<float, tile_size, 1>;
     using O_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size];
+    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, tile_size, dim_head>::forward_size];
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
@@ -998,7 +1024,7 @@ __global__ void backward_kernel(
     using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
     using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[Q_sm_t::size + K_sm_t::size + C_sm_t::size + D_sm_t::size];
+    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, tile_size, dim_head>::backward_size];
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
@@ -1247,7 +1273,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64, 32), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
 
             const int tile_size = 64;
 
@@ -1337,7 +1363,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // setup backwards call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64, 32), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
 
             const int tile_size = 64;
 
