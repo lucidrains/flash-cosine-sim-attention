@@ -254,6 +254,9 @@ namespace layout {
         // constraints
         static_assert(N_warp * M_warp == 32);
         static_assert(N_block * M_block * N_warp * M_warp == layout::tpb<scalar_t, 64>::TPB);
+
+        static_assert(N_warp * N_block * N_thread == 64);
+        static_assert(M_warp * M_block * M_thread == 64);
     };
 
     // f16
@@ -288,6 +291,9 @@ namespace layout {
         // constraints
         static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
         static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 64>::TPB);
+
+        static_assert(N_thread * N_warp * N_block == 64);
+        static_assert(M_thread * M_warp * M_block == 64);
     };
 }
 
