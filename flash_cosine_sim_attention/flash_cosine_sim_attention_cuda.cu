@@ -6,12 +6,17 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
+#include "dispatch.h"
+
 // error handler
 // from https://leimao.github.io/blog/Proper-CUDA-Error-Checking
 
-#define CHECK_LAST_CUDA_ERROR() check(__FILE__, __LINE__)
-void check(const char* file, const int line)
+#define CHECK_LAST_CUDA_ERROR(cuda_sync) check(__FILE__, __LINE__, cuda_sync)
+void check(const char* file, const int line, const bool cuda_sync)
 {
+    if (cuda_sync)
+        cudaDeviceSynchronize();
+
     cudaError_t err = cudaGetLastError();
 
     if (err != cudaSuccess) {
@@ -32,78 +37,6 @@ using PackedAccessor = torch::PackedTensorAccessor32<scalar_t, dims, torch::Rest
 __host__ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
-
-// Custom dispatch inspired from
-// https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
-// https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
-// https://github.com/swansontec/map-macro
-
-// Macro utilities:
-
-#include <ATen/Dispatch.h>
-
-#define REMOVE_PAREN_IMPL(...) __VA_ARGS__
-#define REMOVE_PAREN(args) REMOVE_PAREN_IMPL args
-
-#define EVAL0(...) __VA_ARGS__
-#define EVAL1(...) EVAL0(EVAL0(EVAL0(__VA_ARGS__)))
-#define EVAL2(...) EVAL1(EVAL1(EVAL1(__VA_ARGS__)))
-#define EVAL3(...) EVAL2(EVAL2(EVAL2(__VA_ARGS__)))
-#define EVAL4(...) EVAL3(EVAL3(EVAL3(__VA_ARGS__)))
-#define EVAL(...)  EVAL4(EVAL4(EVAL4(__VA_ARGS__)))
-
-#define MAP_END(...)
-#define MAP_OUT
-
-#define MAP_GET_END2() 0, MAP_END
-#define MAP_GET_END1(...) MAP_GET_END2
-#define MAP_GET_END(...) MAP_GET_END1
-#define MAP_NEXT0(test, next, ...) next MAP_OUT
-#define MAP_NEXT1(test, next) MAP_NEXT0(test, next, 0)
-#define MAP_NEXT(test, next)  MAP_NEXT1(MAP_GET_END test, next)
-
-#define MAP0(f, TYPE_NAME, CASE_CODE, x, peek, ...) f(TYPE_NAME, CASE_CODE, x) MAP_NEXT(peek, MAP1)(f, TYPE_NAME, CASE_CODE, peek, __VA_ARGS__)
-#define MAP1(f, TYPE_NAME, CASE_CODE, x, peek, ...) f(TYPE_NAME, CASE_CODE, x) MAP_NEXT(peek, MAP0)(f, TYPE_NAME, CASE_CODE, peek, __VA_ARGS__)
-#define MAP(f, TYPE_NAME, CASE_CODE, ...) EVAL(MAP1(f, TYPE_NAME, CASE_CODE, __VA_ARGS__, ()()(), ()()(), ()()(), 0))
-
-// Type dispatch
-
-#define AT_TYPE_DISPATCH_CASE(TYPE_NAME, CASE_CODE, x)                            \
-    case x: {                                                                     \
-        using TYPE_NAME C10_UNUSED_DISPATCH_CUDA_WORKAROUND =                     \
-          typename c10::impl::ScalarTypeToCPPType<x>::type;                       \
-        REMOVE_PAREN(CASE_CODE)                                                   \
-        break;                                                                    \
-    }
-
-#define AT_TYPE_DISPATCH_SWITCH(TYPE, TYPE_NAME, TYPES, CASE_CODE, DEFAULT_CODE)  \
-  {                                                                               \
-    switch (TYPE) {                                                               \
-        MAP(AT_TYPE_DISPATCH_CASE, TYPE_NAME, CASE_CODE, REMOVE_PAREN(TYPES))     \
-        default: {                                                                \
-            REMOVE_PAREN(DEFAULT_CODE)                                            \
-        }                                                                         \
-    }                                                                             \
-  }
-
-// Value dispatch
-
-#define VALUE_DISPATCH_CASE(VALUE_NAME, CASE_CODE, x)                             \
-    case x: {                                                                     \
-        constexpr const auto VALUE_NAME = x;                                      \
-        REMOVE_PAREN(CASE_CODE)                                                   \
-        break;                                                                    \
-    }
-
-#define VALUE_DISPATCH_SWITCH(VALUE, VALUE_NAME, VALUES, CASE_CODE, DEFAULT_CODE) \
-  {                                                                               \
-    switch (VALUE) {                                                              \
-        MAP(VALUE_DISPATCH_CASE, VALUE_NAME, CASE_CODE, REMOVE_PAREN(VALUES))     \
-        default: {                                                                \
-            REMOVE_PAREN(DEFAULT_CODE)                                            \
-        }                                                                         \
-    }                                                                             \
-  }
 
 // shared memory struct
 
@@ -262,30 +195,129 @@ struct rowsum_accumulator {
     }
 };
 
+// layout for every type of head dimension, not generalized yet
+
+namespace layout {
+
+    // threads per block
+
+    template<typename scalar_t, int dim_head>
+    struct tpb {
+        static constexpr int TPB = 256;
+    };
+
+    template<int dim_head>
+    struct tpb<c10::Half, dim_head> {
+        static constexpr int TPB = 256;
+    };
+
+    // shared memory sizes that depends on layout, if needed
+
+    template<typename scalar_t, int dim_head>
+    struct smem {
+        static constexpr int size = 0; // figure out later
+    };
+
+    template<int dim_head>
+    struct smem<c10::Half, dim_head> {
+        static constexpr int size = 0;
+    };
+
+    // f32
+
+    template<typename scalar_t, int dim_head, int N_tile_, int M_tile_>
+    struct warp {
+        static constexpr int K_tile = 1;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        static constexpr int N_warp = 8;
+        static constexpr int M_warp = 4;
+
+        static constexpr int N_thread = N_tile_ / (N_warp * N_block);
+        static constexpr int M_thread = M_tile_ / (M_warp * M_block);
+    };
+
+
+    template<typename scalar_t>
+    struct warp<scalar_t, 64, 64, 64> {
+        static constexpr int N_warp = 8;
+        static constexpr int M_warp = 4;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        static constexpr int N_thread = 4;
+        static constexpr int M_thread = 4;
+
+        // constraints
+        static_assert(N_warp * M_warp == 32);
+        static_assert(N_block * M_block * N_warp * M_warp == layout::tpb<scalar_t, 64>::TPB);
+    };
+
+    // f16
+
+    template<int dim_head, int N_tile_, int M_tile_>
+    struct warp<c10::Half, dim_head, N_tile_, M_tile_> {
+        static constexpr int K_tile = 16;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_thread = N_tile_ / (N_warp * N_block);
+        static constexpr int M_thread = M_tile_ / (M_warp * M_block);
+    };
+
+    template<>
+    struct warp<c10::Half, 64, 64, 64> {
+        static constexpr int TPB = 256;
+
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 1;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 64>::TPB);
+    };
+}
+
 // warp tile, done by @ahennequ Arthur Hennequin
 
 #include <mma.h>
 
 namespace mma {
-    template<typename scalar_t>
+    template<typename scalar_t, int dim_head, int N_tile_, int M_tile_>
     struct warp_tile {
+
+        using l = layout::warp<scalar_t, dim_head, N_tile_, M_tile_>;
+
         // How much data is processed by a single thread:
-        static constexpr int N_thread = 4;
-        static constexpr int M_thread = 4;
+        static constexpr int N_thread = l::N_thread;
+        static constexpr int M_thread = l::M_thread;
 
         // Thread layout within a warp:
-        static constexpr int N_warp = 8;
-        static constexpr int M_warp = 4;
-        static_assert(N_warp * M_warp == 32);
+        static constexpr int N_warp = l::N_warp;
+        static constexpr int M_warp = l::M_warp;
 
         // Warp layout within a block:
-        static constexpr int N_block = 2;
-        static constexpr int M_block = 4;
-        static_assert(N_block * M_block * N_warp * M_warp == 256); // blockDim.x
+        static constexpr int N_block = l::N_block;
+        static constexpr int M_block = l::M_block;
 
         // Dimensions of the tile, in threads:
-        static constexpr int N_tile = N_warp * N_block * N_thread;
-        static constexpr int M_tile = M_warp * M_block * M_thread;
+        static constexpr int N_tile = N_tile_;
+        static constexpr int M_tile = M_tile_;
         static constexpr int K_tile = 1;
 
         // Registers:
@@ -358,20 +390,6 @@ namespace mma {
             }
         }
 
-        // Perform an operation on each element, specified by the given lambda, on C
-        template<typename F>
-        __device__ void foreach(F&& op) {
-            #pragma unroll
-            for (int i = 0; i < N_thread; i++) {
-                int row = i * N_warp + thread_y;
-                #pragma unroll
-                for (int j = 0; j < M_thread; j++) {
-                    int col = j * M_warp  + thread_x;
-                    op(C_frag[i * M_thread + j], col, row);
-                }
-            }
-        }
-
         // Copy C from registers to shared memory
         template<typename shared_fragment>
         __device__ void store(shared_fragment& C_sm) {
@@ -427,23 +445,26 @@ namespace mma {
     };
 
     using namespace nvcuda;
-    template<>
-    struct warp_tile<c10::Half> {
+    template<int dim_head, int N_tile_, int M_tile_>
+    struct warp_tile<c10::Half, dim_head, N_tile_, M_tile_> {
+
+        using l = layout::warp<c10::Half, dim_head, N_tile_, M_tile_>;
+
         // How much data is processed by a single thread:
-        static constexpr int N_thread = 2;
-        static constexpr int M_thread = 1;
+        static constexpr int N_thread = l::N_thread;
+        static constexpr int M_thread = l::M_thread;
 
         // Thread layout within a warp:
-        static constexpr int N_warp = 16;
-        static constexpr int M_warp = 16;
+        static constexpr int N_warp = l::N_warp;
+        static constexpr int M_warp = l::M_warp;
 
         // Warp layout within a block:
-        static constexpr int N_block = 2;
-        static constexpr int M_block = 4;
+        static constexpr int N_block = l::N_block;
+        static constexpr int M_block = l::M_block;
 
         // Dimensions of the tile, in threads:
-        static constexpr int N_tile = N_warp * N_block * N_thread;
-        static constexpr int M_tile = M_warp * M_block * M_thread;
+        static constexpr int N_tile = N_tile_;
+        static constexpr int M_tile = M_tile_;
         static constexpr int K_tile = 16;
 
         using output_t = half;
@@ -606,7 +627,7 @@ namespace mma {
 
 // forward kernel
 
-template <typename scalar_t, int tile_size>
+template <typename scalar_t, int tile_size, int dim_head>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -637,12 +658,13 @@ __global__ void forward_kernel(
 
     constexpr int chunk_size = 16;
 
-    using QK_mma_t  = mma::warp_tile<scalar_t>;
-    using out_mma_t = mma::warp_tile<scalar_t>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, tile_size, tile_size>;
+    using out_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
 
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
-    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, out_mma_t::M_tile>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
+
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 2, tile_size>;
     using L_sm_t = mem::shared_fragment<float, tile_size, 1>;
@@ -849,7 +871,7 @@ __global__ void backward_preprocess(
 
 // main backward kernel
 
-template <typename scalar_t, int tile_size>
+template <typename scalar_t, int tile_size, int dim_head>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -891,10 +913,10 @@ __global__ void backward_kernel(
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t>;
-    using dV_mma_t = mma::warp_tile<scalar_t>;
-    using dK_mma_t = mma::warp_tile<scalar_t>;
-    using dQ_mma_t = mma::warp_tile<scalar_t>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, tile_size, tile_size>;
+    using dV_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
+    using dK_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
+    using dQ_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
 
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
@@ -1131,6 +1153,8 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
+    // dimensions and derived values
+
     const int batch     = q.size(0);
     const int heads     = q.size(1);
     const int kv_heads  = k.size(1);
@@ -1150,16 +1174,14 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
     auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
     auto l = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
 
-    // setup threads per block
-
-    const int tile_size = 64;
-
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
 
-            const dim3 threads_per_block(256);
+            const int tile_size = 64;
+
+            const dim3 threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
 
             const dim3 blocks(
                 cdiv(q_seq_len, tile_size),
@@ -1167,7 +1189,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
                 heads
             );
 
-            forward_kernel<scalar_t, tile_size><<<blocks, threads_per_block>>>(
+            forward_kernel<scalar_t, tile_size, dim_head><<<blocks, threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
@@ -1187,11 +1209,9 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
         ), ())
     ), ())
 
-    // handle error
+    // handle error    
 
-    cudaDeviceSynchronize();
-
-    CHECK_LAST_CUDA_ERROR();
+    CHECK_LAST_CUDA_ERROR(true);
 
     return { o, l };
 }
@@ -1217,6 +1237,8 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
+    // dimensions and derived values
+
     const int batch    = q.size(0);
     const int heads    = q.size(1);
     const int kv_heads = k.size(1);
@@ -1232,26 +1254,25 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // create intermediate or output tensors
 
     auto options = torch::TensorOptions().device(query_device);
+    auto options_kfloat_dtype = options.dtype(torch::kFloat);
 
-    auto delta = at::empty({batch, heads, seq}, options.dtype(torch::kFloat));
+    auto delta = at::empty({batch, heads, seq}, options_kfloat_dtype);
 
-    auto dq = at::zeros_like(q, options.dtype(torch::kFloat));
-    auto dk = at::zeros_like(k, options.dtype(torch::kFloat));
-    auto dv = at::zeros_like(v, options.dtype(torch::kFloat));
+    auto dq = at::zeros_like(q, options_kfloat_dtype);
+    auto dk = at::zeros_like(k, options_kfloat_dtype);
+    auto dv = at::zeros_like(v, options_kfloat_dtype);
 
-    auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias, options.dtype(torch::kFloat)) : at::empty({attn_bias.size(0), 0, 0}, options.dtype(torch::kFloat));
-
-    // setup threads per block
-
-    const int tile_size = 64;
+    auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias, options_kfloat_dtype) : at::empty({attn_bias.size(0), 0, 0}, options_kfloat_dtype);
 
     // setup backwards call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (64), (
 
+            const int tile_size = 64;
+
             const dim3 backwards_preprocess_threads_per_block(dim_head);
-            const dim3 backwards_threads_per_block(256);
+            const dim3 backwards_threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
 
             const dim3 backwards_blocks(
                 batch * heads,
@@ -1266,7 +1287,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(delta, 3, float)
             );
 
-            backward_kernel<scalar_t, tile_size><<<backwards_blocks, backwards_threads_per_block>>>(
+            backward_kernel<scalar_t, tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
@@ -1291,11 +1312,9 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
         ), ())
     ), ())
 
-    cudaDeviceSynchronize();
-
     // handle error
 
-    CHECK_LAST_CUDA_ERROR();
+    CHECK_LAST_CUDA_ERROR(true);
 
     return { dq, dk, dv, db };
 }
