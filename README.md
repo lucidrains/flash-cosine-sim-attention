@@ -36,10 +36,23 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 ## Supported head dimensions (wip)
 
-- [ ] 32 - in progress
-- [x] 64
-- [ ] 96
-- [ ] 128
+- [ ] 32 - f32 forwards - in progress
+- [ ] 32 - f32 backwards - in progress
+- [ ] 32 - f16 forwards - in progress
+- [ ] 32 - f16 backwards - in progress
+
+- [x] 64 - forwards
+- [x] 64 - backwards
+
+- [ ] 96 - f32 forwards
+- [ ] 96 - f32 backwards
+- [ ] 96 - f16 forwards
+- [ ] 96 - f16 backwards
+
+- [ ] 128 - f32 forwards
+- [ ] 128 - f32 backwards
+- [ ] 128 - f16 forwards
+- [ ] 128 - f16 backwards
 
 ## Appreciation
 
