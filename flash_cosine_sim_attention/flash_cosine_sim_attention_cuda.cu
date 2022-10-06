@@ -1016,7 +1016,9 @@ __global__ void backward_kernel(
 
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
-    using DO_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+
+    using DO_sm_t0 = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
+    using DO_sm_t1 = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 1, tile_size>;
@@ -1029,7 +1031,10 @@ __global__ void backward_kernel(
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
     Q_sm_t Q_sm{__shared_mem};
-    DO_sm_t DO_sm{__shared_mem};
+
+    DO_sm_t0 DO_sm{__shared_mem};
+    DO_sm_t1 DO_t_sm{__shared_mem};
+
     L_sm_t L_sm{__shared_mem};
 
     K_sm_t K_sm{Q_sm.next()};
@@ -1147,11 +1152,11 @@ __global__ void backward_kernel(
         QK_mma.zero();
 
         for (int k = 0; k < dim_v; k += chunk_size) {
-            DO_sm.load_transpose(do_, k, row_tile_offset, 0, row_seq_len);
+            DO_t_sm.load_transpose(do_, k, row_tile_offset, 0, row_seq_len);
             V_sm.load_transpose(v_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
-            QK_mma.mma(DO_sm, V_sm, 0, 0, chunk_size);
+            QK_mma.mma(DO_t_sm, V_sm, 0, 0, chunk_size);
             __syncthreads();
         }
 

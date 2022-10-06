@@ -158,8 +158,6 @@ class FlashCosineSimAttention(Function):
 
         o, l, q, k, v, mask, attn_bias = ctx.saved_tensors
 
-        assert not exists(attn_bias) or q.shape[-1] == 128
-
         batch, heads, src_seq, tgt_seq, device, dtype = *q.shape[:3], k.shape[2], q.device, q.dtype
 
         (
