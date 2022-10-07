@@ -4,8 +4,6 @@ Implementation of fused cosine similarity attention in the same style as <a href
 
 In other words, potentially stable, fast, memory efficient, and longer context attention with no downsides.
 
-** Only head size of 64 is recommended for now. Turns out supporting other head sizes is far from trivial **
-
 ## Status (wip)
 
 - Forward kernel now only slightly behind baseline on GTX 2080Ti, but definitely faster on Ampere due to the greater amount of shared memory
@@ -25,12 +23,12 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 ## Todo
 
 - [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
-- [ ] support dimensions of multiples of 16 for query keys and values up to 96 - 128 reserved for A100s
 - [ ] support O(n) 1d dynamic positional bias
 - [ ] bfloat16 support
 - [ ] flexible which type is used for accumulation
-- [ ] debug and fix bias backwards gradients yet again for head size of 32
 
+- [x] support more standard head dimensions (wip)
+- [x] debug and fix bias backwards gradients yet again for head size of 32
 - [x] fix attention bias gradients
 - [x] allow for single-headed key / values, as in PaLM
 - [x] fix atomic add for f16
@@ -43,17 +41,19 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 
 - [x] 32
 - [x] 64
-
-- [x] 128 - f32 forwards
-- [x] 128 - f32 backwards
-- [x] 128 - f16 forwards
+- [x] 128
 
 - [ ] 96 - f32 forwards
 - [ ] 96 - f32 backwards
 - [ ] 96 - f16 forwards
 - [ ] 96 - f16 backwards
 
-- [ ] 128 - f16 backwards - only dq is bugged on f16?
+- [ ] 80 - f32 forwards
+- [ ] 80 - f32 backwards
+- [ ] 80 - f16 forwards
+- [ ] 80 - f16 backwards
+
+*80 for attention inside CLIP*
 
 ## Appreciation
 

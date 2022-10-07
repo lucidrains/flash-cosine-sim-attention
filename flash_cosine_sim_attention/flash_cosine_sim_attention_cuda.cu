@@ -547,7 +547,7 @@ namespace mma {
         using output_t = half;
 
         // Registers:
-        wmma::fragment<wmma::accumulator, 16, 16, 16, output_t> C_frag[N_thread * M_thread];
+        wmma::fragment<wmma::accumulator, 16, 16, 16, half> C_frag[N_thread * M_thread];
 
         int warp_x;   // x offset of the warp within the block tile
         int warp_y;   // y offset of the warp within the block tile
@@ -688,14 +688,17 @@ namespace mma {
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
                 #pragma unroll
-                for (int j = 0; j < C_frag[i].num_elements; j++) {
-                    int col = col_tile_offset + get_warp_col(j) + warp_x * 16;
-                    int row = row_tile_offset + get_warp_row(j) + i * 16 + warp_y * 32;
+                for (int j = 0; j < M_thread; j++) {
+                    #pragma unroll
+                    for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
+                        int col = col_tile_offset + get_warp_col(k) + (warp_x * M_thread + j) * M_warp;
+                        int row = row_tile_offset + get_warp_row(k) + (warp_y * N_thread + i) * N_warp;
 
-                    if (col >= col_max || row >= row_max)
-                        continue;
+                        if (col >= col_max || row >= row_max)
+                            continue;
 
-                    atomicAdd((float*) &gmem[row][col], __half2float(C_frag[i].x[j]));
+                        atomicAdd((float*) &gmem[row][col], __half2float(C_frag[i * M_thread + j].x[k]));
+                    }
                 }
             }
         }
@@ -1421,6 +1424,15 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     // handle error
 
     CHECK_LAST_CUDA_ERROR(true);
+
+    // cast back to original type of queries
+
+    dq = dq.to(q_scalar_type);
+    dk = dk.to(q_scalar_type);
+    dv = dv.to(q_scalar_type);
+
+    if (has_attn_bias)
+        db = db.to(q_scalar_type);
 
     return { dq, dk, dv, db };
 }

@@ -184,13 +184,6 @@ class FlashCosineSimAttention(Function):
         if single_head_kv:
             dk, dv = map(lambda t: t.squeeze(1), (dk, dv))
 
-        dq = dq.type(dtype)
-        dk = dk.type(dtype)
-        dv = dv.type(dtype)
-
-        if exists(db):
-            db = db.type(dtype)
-
         return dq, dk, dv, None, db, None, None, None, None, None, None, None, None, None, None
 
 # wrapper function
