@@ -4,6 +4,8 @@ Implementation of fused cosine similarity attention in the same style as <a href
 
 In other words, potentially stable, fast, memory efficient, and longer context attention with no downsides.
 
+** Only head size of 64 is recommended for now. Turns out supporting other head sizes is far from trivial **
+
 ## Status (wip)
 
 - Forward kernel now only slightly behind baseline on GTX 2080Ti, but definitely faster on Ampere due to the greater amount of shared memory
@@ -127,7 +129,9 @@ So far cosine similarity attention is not widely used in industry. The only larg
 
 Update: <a href="https://github.com/borisdayma">Boris Dayma</a> has graciously kicked off <a href="https://wandb.ai/dalle-mini/dalle-mini/reports/Fix-Swin-v2--VmlldzoyNDA4Mzc3">an experiment (blue with red as baseline)</a> to validate cosine similarity attention with a fixed scale of 10 in a real-world model setting. 🙏
 
-Update 2: Cosine similarity attention has been proven out in a real-world text-to-image attention network, using a constant scale of `10`. No worse than full attention. Credit goes to <a href="https://github.com/borisdayma">Boris Dayma</a> for investing the time to run the experiment and removing doubts surrounding the technique.
+Update 2: Cosine similarity attention has been proven out in a real-world text-to-image attention network, using a constant scale of `10`. No worse than regular attention. Credit goes to <a href="https://github.com/borisdayma">Boris Dayma</a> for investing the time to run the experiment and removing doubts surrounding the technique.
+
+Update 3: <a href="https://github.com/rromb">Robin Rombach</a> has tested out the kernel in this repository with head size of 64 and fixed scale of 10 in a text-to-image model, observing no difference from regular attention. More evaluations pending.
 
 ## Testing
 
@@ -135,12 +139,6 @@ For testing output and gradients are equal for non-autoregressive and autoregres
 
 ```bash
 $ python setup.py test
-```
-
-For testing the cuda kernel on enwik8 training
-
-```bash
-$ pip install -r requirements.txt && python train.py --use-cuda-kernel
 ```
 
 ## Benchmarking

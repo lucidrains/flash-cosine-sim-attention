@@ -2,6 +2,9 @@
 install:
 	python setup.py install --user
 
+install_requirements:
+	pip install -r requirements.txt
+
 test: install
 	python setup.py test
 
@@ -26,7 +29,7 @@ benchmark_forward_causal: install
 benchmark_backward_causal: install
 	python benchmark.py --only-backwards --causal
 
-train: install
+train: install install_requirements
 	python train.py --use-cuda-kernel
 
 clean:
