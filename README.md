@@ -8,6 +8,10 @@ In other words, stable, fast, memory efficient, and longer context attention wit
 
 - <a href="https://github.com/ahennequ">Arthur Hennequin</a> for coaching me through my first CUDA kernel, and for coding up a simple <a href="https://github.com/ahennequ/pytorch-custom-mma">reference implementation</a>, which helped me to bootstrap the first kernel that comes within reasonable performance to baseline. This work would not have been possible without his expertise.
 
+- <a href="https://github.com/borisdayma">Boris Dayma</a> and <a href="https://github.com/rromb">Robin Rombach</a> for running experiments the simplified cosine sim attention with fixed scaling on some significant text-to-image models and verifying that it indeeds perform just as well as regular attention.
+
+- <a href="https://github.com/MarkusRabe">Markus Rabe</a> and <a href="https://tridao.me/">Tri Dao</a> for respectively penning the paper that showed attention does not require O(n²) memory, and Tri for putting it all together into <a href="https://github.com/HazyResearch/flash-attention">a CUDA kernel</a> and demonstrating superiority in speed using the tiled approach minimizing HBM accesses. Would not have been able to complete my pilgrimage looking for the ultimate attention formulation without their discoveries.
+
 - <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
 
 ## Supported head dimensions
@@ -102,22 +106,6 @@ v = torch.randn(1, 1024, 64).cuda()
 
 out = flash_cosine_sim_attention(q, k, v, causal = True)  # (1, 8, 1024, 64)
 ```
-
-## Status
-
-- Forward kernel now only slightly behind baseline on GTX 2080Ti, but definitely faster on Ampere due to the greater amount of shared memory
-
-- Backwards kernel is still 3x slower, 1.5x slower for autoregressive
-
-- Thanks to Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
-
-- All tests now pass for F16 and the transformer trains! Big thanks to Arthur 🙏
-
-- There is a bug with the atomicAdd for dQ for F16, so F16 is still not safe for use
-
-- F16 is now fixed for dQ with a hack, but performance is no longer that great (1.3-3x slower on f16)
-
-- F16 is all good now
 
 ## Todo
 
