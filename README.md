@@ -164,6 +164,7 @@ out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 - [ ] figure out if dk and dv can be accumulated in half, even if dq cannot, and whether it makes any difference at all
 - [ ] allow for flexible definition of whether warp tile atomic adds to float or half
 - [ ] figure out how to dispatch differently for architectures (say A100), in case backwards can make use of the increase in shared memory differently
+- [ ] allow for other attention tile sizes other than 64x64
 
 - [x] support more standard head dimensions (wip)
 - [x] debug and fix bias backwards gradients yet again for head size of 32
