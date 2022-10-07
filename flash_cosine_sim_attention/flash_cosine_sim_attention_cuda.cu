@@ -247,8 +247,8 @@ namespace layout {
         );
 
         static constexpr int backward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // q
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // k
+            mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // q
+            mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // k
             mem::shared_fragment<scalar_t, tile_size, tile_size>::size +     // c
             mem::shared_fragment<scalar_t, 1, tile_size>::size               // d
         );
@@ -731,8 +731,6 @@ __global__ void forward_kernel(
     const int col_seq_len = k.size(2);
     const int seq_len_diff = col_seq_len - row_seq_len;
 
-    const int dim_qk = q.size(3);
-
     constexpr int chunk_size = 16;
     const int row_tile_offset = blockIdx.x * tile_size;
 
@@ -800,7 +798,7 @@ __global__ void forward_kernel(
 
         // get qk similarity matrix
 
-        for (int i = 0; i < dim_qk; i += chunk_size) {
+        for (int i = 0; i < dim_head; i += chunk_size) {
             Q_sm.load_transpose(Q_, i, row_tile_offset, 0, row_seq_len);
             K_sm.load_transpose(K_, i, col_tile_offset, 0, col_seq_len);
             __syncthreads();
@@ -991,9 +989,6 @@ __global__ void backward_kernel(
     const int col_seq_len = k.size(2);
     const int seq_len_diff = col_seq_len - row_seq_len;
 
-    const int dim_qk = k.size(3);
-    const int dim_v = v.size(3);
-
     constexpr int chunk_size = 16;
 
     // registers
@@ -1010,15 +1005,18 @@ __global__ void backward_kernel(
 
     // shared memory
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
+
     using L_sm_t = mem::shared_fragment<float, 1, tile_size>;
     using D_sm_t = mem::shared_fragment<scalar_t, 1, tile_size>;
 
-    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using K_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using K_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
 
-    using DO_sm_t0 = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
-    using DO_sm_t1 = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using DO_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
+    using DO_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 1, tile_size>;
@@ -1030,22 +1028,29 @@ __global__ void backward_kernel(
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
-    Q_sm_t Q_sm{__shared_mem};
+    Q_sm_ Q_sm{__shared_mem};
+    Q_sm_t_ Q_sm_t{__shared_mem};
 
-    DO_sm_t0 DO_sm{__shared_mem};
-    DO_sm_t1 DO_t_sm{__shared_mem};
+    DO_sm_ DO_sm{__shared_mem};
+    DO_sm_t_ DO_sm_t{__shared_mem};
 
     L_sm_t L_sm{__shared_mem};
 
-    K_sm_t K_sm{Q_sm.next()};
-    V_sm_t V_sm{Q_sm.next()};
-    D_sm_t D_sm{K_sm.next()};
+    DK_sm_t DK_sm{__shared_mem};
+    DV_sm_t DV_sm{__shared_mem};
+
+    auto next_ptr = (dim_head > tile_size) ? DO_sm.next() : DO_sm_t.next();
+
+    K_sm_ K_sm{next_ptr};
+    K_sm_t_ K_sm_t{next_ptr};
+    V_sm_t V_sm{next_ptr};
+
+    auto next_ptr_ = (dim_head > tile_size) ? K_sm.next() : K_sm_t.next();
+
+    D_sm_t D_sm{next_ptr_};
 
     C_sm_t C_sm{D_sm.next()};
     mask_sm_t mask_sm{D_sm.next()};
-
-    DK_sm_t DK_sm{D_sm.next()};
-    DV_sm_t DV_sm{D_sm.next()};
 
     // shortcut accessors
 
@@ -1090,12 +1095,12 @@ __global__ void backward_kernel(
 
         // get qk similarity matrix
 
-        for (int k = 0; k < dim_qk; k += chunk_size) {
-            Q_sm.load_transpose(q_, k, row_tile_offset, 0, row_seq_len);
-            K_sm.load_transpose(k_, k, col_tile_offset, 0, col_seq_len);
+        for (int k = 0; k < dim_head; k += chunk_size) {
+            Q_sm_t.load_transpose(q_, k, row_tile_offset, 0, row_seq_len);
+            K_sm_t.load_transpose(k_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
-            QK_mma.mma(Q_sm, K_sm, 0, 0, chunk_size);
+            QK_mma.mma(Q_sm_t, K_sm_t, 0, 0, chunk_size);
             __syncthreads();
         }
 
@@ -1151,12 +1156,12 @@ __global__ void backward_kernel(
 
         QK_mma.zero();
 
-        for (int k = 0; k < dim_v; k += chunk_size) {
-            DO_t_sm.load_transpose(do_, k, row_tile_offset, 0, row_seq_len);
+        for (int k = 0; k < dim_head; k += chunk_size) {
+            DO_sm_t.load_transpose(do_, k, row_tile_offset, 0, row_seq_len);
             V_sm.load_transpose(v_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
-            QK_mma.mma(DO_t_sm, V_sm, 0, 0, chunk_size);
+            QK_mma.mma(DO_sm_t, V_sm, 0, 0, chunk_size);
             __syncthreads();
         }
 
@@ -1219,13 +1224,13 @@ __global__ void backward_kernel(
             __syncthreads();
         }
 
-        dq_mma.atomic_add(dq_, row_tile_offset, 0, row_seq_len, dim_qk);
+        dq_mma.atomic_add(dq_, row_tile_offset, 0, row_seq_len, dim_head);
     }
 
     if (is_single_head_kv) {
-        dv_mma.atomic_add(dv_, col_tile_offset, 0, col_seq_len, dim_v);
+        dv_mma.atomic_add(dv_, col_tile_offset, 0, col_seq_len, dim_head);
 
-        dk_mma.atomic_add(dk_, col_tile_offset, 0, col_seq_len, dim_qk);
+        dk_mma.atomic_add(dk_, col_tile_offset, 0, col_seq_len, dim_head);
 
     } else {
         dv_mma.store(dv_, DV_sm, 0, col_tile_offset, 0, col_seq_len);

@@ -42,15 +42,16 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [x] 32
 - [x] 64
 
+- [x] 128 - f32 forwards
+- [x] 128 - f32 backwards
+- [x] 128 - f16 forwards
+
 - [ ] 96 - f32 forwards
 - [ ] 96 - f32 backwards
 - [ ] 96 - f16 forwards
 - [ ] 96 - f16 backwards
 
-- [x] 128 - f32 forwards
-- [ ] 128 - f32 backwards
-- [x] 128 - f16 forwards
-- [ ] 128 - f16 backwards
+- [ ] 128 - f16 backwards - only dq is bugged on f16?
 
 ## Appreciation
 

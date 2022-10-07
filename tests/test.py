@@ -57,7 +57,7 @@ def test_output_equal(
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize('attn_bias', [True, False])
 @pytest.mark.parametrize('seq_len', [63, 127])
-@pytest.mark.parametrize('dim_head', [64, 32])
+@pytest.mark.parametrize('dim_head', [64, 32, 128])
 @pytest.mark.parametrize('float16', [False, True])
 @pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
 @pytest.mark.parametrize('single_head_kv', [False, True])
