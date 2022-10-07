@@ -1,43 +1,16 @@
-## Flash Cosine Similarity Attention (wip)
+## Flash Cosine Similarity Attention
 
 Implementation of fused cosine similarity attention in the same style as <a href="https://arxiv.org/abs/2205.14135">Flash Attention</a>. The observation is that by adopting l2 normalized queries and keys, you no longer need to keep track of the row maximums for numerical stability. This greatly simplifies the flash attention algorithm, assuming cosine similarity attention comes at no generalization cost.
 
-In other words, potentially stable, fast, memory efficient, and longer context attention with no downsides.
+In other words, stable, fast, memory efficient, and longer context attention with no downsides.
 
-## Status (wip)
+## Appreciation
 
-- Forward kernel now only slightly behind baseline on GTX 2080Ti, but definitely faster on Ampere due to the greater amount of shared memory
+- <a href="https://github.com/ahennequ">Arthur Hennequin</a> for coaching me through my first CUDA kernel, and for coding up a simple <a href="https://github.com/ahennequ/pytorch-custom-mma">reference implementation</a>, which helped me to bootstrap the first kernel that comes within reasonable performance to baseline. This work would not have been possible without his expertise.
 
-- Backwards kernel is still 3x slower, 1.5x slower for autoregressive
+- <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
 
-- Thanks to Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
-
-- All tests now pass for F16 and the transformer trains! Big thanks to Arthur 🙏
-
-- There is a bug with the atomicAdd for dQ for F16, so F16 is still not safe for use
-
-- F16 is now fixed for dQ with a hack, but performance is no longer that great (1.3-3x slower on f16)
-
-- F16 is all good now
-
-## Todo
-
-- [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
-- [ ] support O(n) 1d dynamic positional bias
-- [ ] bfloat16 support
-- [ ] flexible which type is used for accumulation
-
-- [x] support more standard head dimensions (wip)
-- [x] debug and fix bias backwards gradients yet again for head size of 32
-- [x] fix attention bias gradients
-- [x] allow for single-headed key / values, as in PaLM
-- [x] fix atomic add for f16
-- [x] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
-- [x] automate cache-busting of kernel using version as suffix to package name
-- [x] resolve f16 causal numerical issues
-- [x] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
-
-## Supported head dimensions (wip)
+## Supported head dimensions
 
 - [x] 32
 - [x] 64
@@ -54,12 +27,6 @@ In other words, potentially stable, fast, memory efficient, and longer context a
 - [ ] 80 - f16 backwards
 
 *80 for attention inside CLIP*
-
-## Appreciation
-
-- <a href="https://github.com/ahennequ">Arthur Hennequin</a> for coaching me through my first CUDA kernel, and for coding up a simple <a href="https://github.com/ahennequ/pytorch-custom-mma">reference implementation</a>, which helped me to bootstrap the first kernel that comes within reasonable performance to baseline. This work would not have been possible without his expertise.
-
-- <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
 
 ## Install
 
@@ -122,6 +89,54 @@ v = torch.randn(1, 8, 1024, 64).cuda()
 
 out = flash_cosine_sim_attention(q, k, v, causal = True)  # (1, 8, 1024, 64)
 ```
+
+Single-headed key / values (Shazeer et al & used in PaLM)
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(1, 8, 1024, 64).cuda()
+k = torch.randn(1, 1024, 64).cuda()
+v = torch.randn(1, 1024, 64).cuda()
+
+out = flash_cosine_sim_attention(q, k, v, causal = True)  # (1, 8, 1024, 64)
+```
+
+## Status
+
+- Forward kernel now only slightly behind baseline on GTX 2080Ti, but definitely faster on Ampere due to the greater amount of shared memory
+
+- Backwards kernel is still 3x slower, 1.5x slower for autoregressive
+
+- Thanks to Arthur, now at 2-4x faster for forwards autoregressive, 1-2x faster for backwards. float 16 causal still facing some numerical issues
+
+- All tests now pass for F16 and the transformer trains! Big thanks to Arthur 🙏
+
+- There is a bug with the atomicAdd for dQ for F16, so F16 is still not safe for use
+
+- F16 is now fixed for dQ with a hack, but performance is no longer that great (1.3-3x slower on f16)
+
+- F16 is all good now
+
+## Todo
+
+- [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
+- [ ] support O(n) 1d dynamic positional bias
+- [ ] bfloat16 support
+- [ ] flexible which type is used for accumulation
+- [ ] figure out if dk and dv can be accumulated in half, even if dq cannot, and whether it makes any difference at all
+- [ ] allow for flexible definition of whether warp tile atomic adds to float or half
+
+- [x] support more standard head dimensions (wip)
+- [x] debug and fix bias backwards gradients yet again for head size of 32
+- [x] fix attention bias gradients
+- [x] allow for single-headed key / values, as in PaLM
+- [x] fix atomic add for f16
+- [x] attention bias should be able to accept dimensions of an extra batch dimension, for Alphafold2 like attention biasing
+- [x] automate cache-busting of kernel using version as suffix to package name
+- [x] resolve f16 causal numerical issues
+- [x] adopt all learnings from forward kernel to backwards kernel and make sure it outperforms at least on A100
 
 ## Description
 

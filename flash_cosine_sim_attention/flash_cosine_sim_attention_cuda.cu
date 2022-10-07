@@ -877,7 +877,7 @@ template <typename scalar_t, int dim_head>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-          PackedAccessor<float, 3> delta
+          PackedAccessor<scalar_t, 3> delta
 ) {
     const int heads = o.size(1);
     const int v_dim = o.size(3);
@@ -898,9 +898,9 @@ __global__ void backward_preprocess(
 
     // shared memory
 
-    __shared__ float _shared_mem_preprocess[dim_head / 32];
+    __shared__ scalar_t _shared_mem_preprocess[dim_head / 32];
 
-    float* sm_delta  = reinterpret_cast<float*>(&_shared_mem_preprocess);
+    scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
 
     // global mem accessors
 
@@ -970,7 +970,7 @@ __global__ void backward_kernel(
           PackedAccessor<float, 4> dv,
           PackedAccessor<float, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out_scaled,
-    const PackedAccessor<float, 3> delta,
+    const PackedAccessor<scalar_t, 3> delta,
     const float scale,
     const bool causal,
     const bool has_mask,
@@ -1365,7 +1365,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     auto options = torch::TensorOptions().device(query_device);
     auto options_kfloat_dtype = options.dtype(torch::kFloat);
 
-    auto delta = at::empty({batch, heads, seq}, options_kfloat_dtype);
+    auto delta = at::empty({batch, heads, seq}, options.dtype(q_scalar_type));
 
     auto dq = at::zeros_like(q, options_kfloat_dtype);
     auto dk = at::zeros_like(k, options_kfloat_dtype);
@@ -1393,7 +1393,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
             backward_preprocess<scalar_t, dim_head><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block>>>(
                 ACCESSOR(d_out, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(delta, 3, float)
+                ACCESSOR(delta, 3, scalar_t)
             );
 
             backward_kernel<scalar_t, tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
@@ -1408,7 +1408,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(dv, 4, float),
                 ACCESSOR(db, 3, float),
                 ACCESSOR(d_out, 4, scalar_t),
-                ACCESSOR(delta, 3, float),
+                ACCESSOR(delta, 3, scalar_t),
                 scale,
                 causal,
                 has_mask,
