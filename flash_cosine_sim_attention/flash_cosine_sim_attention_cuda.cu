@@ -199,6 +199,8 @@ struct rowsum_accumulator {
 
 namespace layout {
 
+    static constexpr int chunk_size = 16;
+
     // threads per block
 
     template<typename scalar_t, int dim_head>
@@ -220,7 +222,6 @@ namespace layout {
 
     template<typename scalar_t, int tile_size, int dim_head>
     struct smem {
-        static constexpr int chunk_size = 16;
 
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
@@ -238,7 +239,6 @@ namespace layout {
 
     template<typename scalar_t, int tile_size>
     struct smem<scalar_t, tile_size, 128> {
-        static constexpr int chunk_size = 16;
 
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
@@ -547,7 +547,7 @@ namespace mma {
         using output_t = half;
 
         // Registers:
-        wmma::fragment<wmma::accumulator, 16, 16, 16, half> C_frag[N_thread * M_thread];
+        wmma::fragment<wmma::accumulator, N_warp, M_warp, K_tile, half> C_frag[N_thread * M_thread];
 
         int warp_x;   // x offset of the warp within the block tile
         int warp_y;   // y offset of the warp within the block tile
@@ -575,8 +575,8 @@ namespace mma {
         // Performs C = A * B + C
         template<typename fragA, typename fragB>
         __device__ void mma(fragA& A_sm, fragB& B_sm, int ka0, int kb0, int D) {
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> A_frag;
-            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> B_frag;
+            wmma::fragment<wmma::matrix_a, N_warp, M_warp, K_tile, half, wmma::col_major> A_frag;
+            wmma::fragment<wmma::matrix_b, N_warp, M_warp, K_tile, half, wmma::row_major> B_frag;
 
             for (int k = 0; k < D; k += K_tile) {
                 #pragma unroll
@@ -865,13 +865,12 @@ __global__ void forward_kernel(
     out_mma.store(O_, O_sm, 0, row_tile_offset, 0, row_seq_len);
 }
 
-// backward kernel
-
 // backwards preprocess
 
 // delta = rowsum(do * o)
+// do_scaled is moved into backwards kernel since seeing numerical issues unique to cosine sim attention
 
-// done by @ptillet at https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
+// done by @ptillet and @tridao for the triton fused attention and flash attention cuda impl
 
 template <typename scalar_t, int dim_head>
 __global__ void backward_preprocess(
@@ -953,7 +952,7 @@ __global__ void backward_preprocess(
     delta_[seq_idx] = (scalar_t) val;
 }
 
-// main backward kernel
+// backward kernel
 
 template <typename scalar_t, int tile_size, int dim_head>
 __global__ void backward_kernel(
