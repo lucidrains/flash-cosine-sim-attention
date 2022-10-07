@@ -10,7 +10,7 @@ In other words, stable, fast, memory efficient, and longer context attention wit
 
 - <a href="https://github.com/borisdayma">Boris Dayma</a> and <a href="https://github.com/rromb">Robin Rombach</a> for running experiments the simplified cosine sim attention with fixed scaling on some significant text-to-image models and verifying that it indeeds perform just as well as regular attention.
 
-- <a href="https://github.com/MarkusRabe">Markus Rabe</a> and <a href="https://tridao.me/">Tri Dao</a> for respectively penning the paper that showed attention does not require O(n²) memory, and Tri for putting it all together into <a href="https://github.com/HazyResearch/flash-attention">a CUDA kernel</a> and demonstrating superiority in speed using the tiled approach minimizing HBM accesses. Would not have been able to complete my pilgrimage looking for the ultimate attention formulation without their discoveries.
+- <a href="https://github.com/MarkusRabe">Markus Rabe</a> for penning the paper that showed <a href="https://arxiv.org/abs/2112.05682">attention does not require O(n²) memory</a>, and <a href="https://tridao.me/">Tri Dao</a> for putting it all together in <a href="https://github.com/HazyResearch/flash-attention">a CUDA kernel implementation for regular attention</a>, demonstrating superiority in speed using the tiled approach minimizing HBM accesses (and for figuring out `dO * O == dP * P` for backwards pass). Would not have been able to complete my pilgrimage looking for the ultimate attention formulation without their discoveries.
 
 - <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
 
