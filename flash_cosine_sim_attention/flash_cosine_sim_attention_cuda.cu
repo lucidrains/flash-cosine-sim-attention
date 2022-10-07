@@ -880,7 +880,6 @@ __global__ void backward_preprocess(
           PackedAccessor<scalar_t, 3> delta
 ) {
     const int heads = o.size(1);
-    const int v_dim = o.size(3);
 
     const int batch_idx = blockIdx.x / heads;
     const int head_idx = blockIdx.x % heads;
@@ -890,7 +889,7 @@ __global__ void backward_preprocess(
     const int warp_id = threadIdx.x / 32;
     const int lane_id = threadIdx.x & 31;
 
-    const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < v_dim);
+    const unsigned mask = __ballot_sync(0xFFFFFFFFU, dim_idx < dim_head);
 
     // registers
 
@@ -910,8 +909,7 @@ __global__ void backward_preprocess(
 
     // load do_scaled * o into registers
 
-    if (dim_idx < v_dim)
-        val = do_[dim_idx] * o_[dim_idx]; // todo: do the trick where one reduction step is taken
+    val = do_[dim_idx] * o_[dim_idx] + do_[dim_idx + blockDim.x] * o_[dim_idx + blockDim.x];
 
     // warp shuffle reduce
 
@@ -1380,7 +1378,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
             const int tile_size = 64;
 
-            const dim3 backwards_preprocess_threads_per_block(dim_head);
+            const dim3 backwards_preprocess_threads_per_block(dim_head / 2);
             const dim3 backwards_threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
 
             const dim3 backwards_blocks(
