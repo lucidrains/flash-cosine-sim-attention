@@ -109,7 +109,8 @@ def plain_cosine_sim_attention(
     scale = 10,
     causal = False,
     l2norm_qk = True,
-    attn_bias_batch_dim = False
+    attn_bias_batch_dim = False,
+    map_qk_fn: callable = None
 
 ):
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
@@ -117,6 +118,9 @@ def plain_cosine_sim_attention(
 
     if l2norm_qk:
         q, k = l2norm_tensors(q, k)
+
+    if exists(map_qk_fn):
+        q, k = map_qk_fn(q, k)
 
     kv_einsum_eq = 'b j d' if single_head_kv else 'b h j d'
     sim = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', q, k)
@@ -244,12 +248,16 @@ def flash_cosine_sim_attention(
     scale = 10,
     causal = False,
     l2norm_qk = True,
-    attn_bias_batch_dim = False
+    attn_bias_batch_dim = False,
+    map_qk_fn: callable = None
 ):
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
     if l2norm_qk:
         q, k = l2norm_tensors(q, k)
+
+    if exists(map_qk_fn):
+        q, k = map_qk_fn(q, k)
 
     o = flash_cosine_sim_attention_cuda(
         q, k, v,
