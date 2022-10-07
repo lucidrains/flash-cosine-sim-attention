@@ -1285,7 +1285,7 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     // dispatch forward call
 
-    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
 
             const int tile_size = 64;
@@ -1375,7 +1375,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     // setup backwards call
 
-    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
 
             const int tile_size = 64;
