@@ -185,6 +185,8 @@ Update 2: Cosine similarity attention has been proven out in a real-world text-t
 
 Update 3: <a href="https://github.com/rromb">Robin Rombach</a> has tested out the kernel in this repository with head size of 64 and fixed scale of 10 in a text-to-image model, observing no difference from regular attention. More evaluations pending.
 
+Update 4: The improvement in performance seen in Boris' experiments are likely due to the fact that cosine-sim attention allows for one to switch from pre layernorm to post layernorm configuration in the transformers (as the l2norm effectively takes the place of the pre-layernorm). Cosine sim attention will likely yield results the same as regular attention, without any other changes to the transformer.
+
 ## Testing
 
 For testing output and gradients are equal for non-autoregressive and autoregressive scenarios
