@@ -94,6 +94,8 @@ v = torch.randn(4, 8, 1024, 64).cuda()
 out = flash_cosine_sim_attention(q, k, v, causal = True)  # (4, 8, 1024, 64)
 ```
 
+## Miscellaneous
+
 Single-headed key / values (Shazeer et al & used in PaLM)
 
 ```python
@@ -125,6 +127,32 @@ q, k = l2norm_tensors(q, k)
 # say with https://github.com/lucidrains/rotary-embedding-torch
 
 out = flash_cosine_sim_attention(q, k, v, l2norm_qk = False)  # (4, 8, 1024, 64)
+```
+
+Cross attention with causal works as expected - (caching of keys and values in autoregressive during inference, or transformer-xl like training)
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(1, 8, 1024, 64).cuda()
+k = torch.randn(1, 8, 2048, 64).cuda()
+v = torch.randn(1, 8, 2048, 64).cuda()
+
+out = flash_cosine_sim_attention(q, k, v, causal = True) # (1, 8, 1024, 64)
+```
+
+If you have batch and head dimensions merged, that is ok
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention
+
+q = torch.randn(32, 1024, 64).cuda()
+k = torch.randn(32, 2048, 64).cuda()
+v = torch.randn(32, 2048, 64).cuda()
+
+out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 ```
 
 ## Todo
