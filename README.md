@@ -87,11 +87,11 @@ Autoregressive
 import torch
 from flash_cosine_sim_attention import flash_cosine_sim_attention
 
-q = torch.randn(1, 8, 1024, 64).cuda()
-k = torch.randn(1, 8, 1024, 64).cuda()
-v = torch.randn(1, 8, 1024, 64).cuda()
+q = torch.randn(4, 8, 1024, 64).cuda()
+k = torch.randn(4, 8, 1024, 64).cuda()
+v = torch.randn(4, 8, 1024, 64).cuda()
 
-out = flash_cosine_sim_attention(q, k, v, causal = True)  # (1, 8, 1024, 64)
+out = flash_cosine_sim_attention(q, k, v, causal = True)  # (4, 8, 1024, 64)
 ```
 
 Single-headed key / values (Shazeer et al & used in PaLM)
@@ -100,11 +100,31 @@ Single-headed key / values (Shazeer et al & used in PaLM)
 import torch
 from flash_cosine_sim_attention import flash_cosine_sim_attention
 
-q = torch.randn(1, 8, 1024, 64).cuda()
-k = torch.randn(1, 1024, 64).cuda()
-v = torch.randn(1, 1024, 64).cuda()
+q = torch.randn(4, 8, 1024, 64).cuda()
+k = torch.randn(4, 1024, 64).cuda()
+v = torch.randn(4, 1024, 64).cuda()
 
-out = flash_cosine_sim_attention(q, k, v, causal = True)  # (1, 8, 1024, 64)
+out = flash_cosine_sim_attention(q, k, v, causal = True)  # (4, 8, 1024, 64)
+```
+
+If you need to do operations on the queries and keys in between the l2norm and the actual attention step, just set `l2norm_qk = False`
+
+ex.
+
+```python
+import torch
+from flash_cosine_sim_attention import flash_cosine_sim_attention, l2norm_tensors
+
+q = torch.randn(4, 8, 1024, 64).cuda()
+k = torch.randn(4, 1024, 64).cuda()
+v = torch.randn(4, 1024, 64).cuda()
+
+q, k = l2norm_tensors(q, k)
+
+# do your rotation of queries and keys
+# say with https://github.com/lucidrains/rotary-embedding-torch
+
+out = flash_cosine_sim_attention(q, k, v, l2norm_qk = False)  # (4, 8, 1024, 64)
 ```
 
 ## Todo

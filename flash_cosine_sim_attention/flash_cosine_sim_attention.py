@@ -1,4 +1,5 @@
 import importlib
+from functools import partial, wraps
 from typing import Optional
 
 import torch
@@ -48,6 +49,48 @@ def l2norm_tensors(*tensors):
     tensors = tuple(map(lambda t: t.type(dtype), tensors))
     return tensors
 
+# decorators
+
+def merged_batch_head_queries(fn):
+    @wraps(fn)
+    def inner(
+        q,
+        k,
+        v,
+        mask = None,
+        attn_bias = None,
+        scale = 10,
+        causal = False,
+        l2norm_qk = True,
+        attn_bias_batch_dim = False
+    ):
+        is_merged_batch_heads_query = q.ndim == 3
+
+        if is_merged_batch_heads_query:
+            assert k.ndim == 3 and v.ndim ==3, 'if batch and heads are merged for queries, keys and values must also similarly have only 3 dimensions'
+
+            attn_bias_batch_dim = True
+            q = q[:, None, ...]
+
+        out = fn(
+            q,
+            k,
+            v,
+            mask = mask,
+            attn_bias = attn_bias,
+            scale = scale,
+            causal = causal,
+            l2norm_qk = l2norm_qk,
+            attn_bias_batch_dim = attn_bias_batch_dim
+        )
+
+        if is_merged_batch_heads_query:
+            out = out.squeeze(1)
+
+        return out
+
+    return inner
+
 # original cosine sim attention
 
 # b - batch
@@ -56,6 +99,7 @@ def l2norm_tensors(*tensors):
 # j - target sequence length
 # d - feature dimension
 
+@merged_batch_head_queries
 def plain_cosine_sim_attention(
     q,
     k,
@@ -186,8 +230,11 @@ class FlashCosineSimAttention(Function):
 
         return dq, dk, dv, None, db, None, None, None, None, None, None, None, None, None, None
 
+flash_cosine_sim_attention_cuda = FlashCosineSimAttention.apply
+
 # wrapper function
 
+@merged_batch_head_queries
 def flash_cosine_sim_attention(
     q,
     k,
@@ -204,7 +251,7 @@ def flash_cosine_sim_attention(
     if l2norm_qk:
         q, k = l2norm_tensors(q, k)
 
-    o = FlashCosineSimAttention.apply(
+    o = flash_cosine_sim_attention_cuda(
         q, k, v,
         mask,
         attn_bias,
