@@ -14,23 +14,6 @@ In other words, stable, fast, memory efficient, and longer context attention wit
 
 - <a href="https://stability.ai/">Stability.ai</a> for the generous sponsorship to work on cutting edge artificial intelligence research
 
-## Supported head dimensions
-
-- [x] 32
-- [x] 64
-- [x] 96 - f32
-- [x] 128
-
-- [ ] 96 - f16 forwards
-- [ ] 96 - f16 backwards
-
-- [ ] 80 - f32 forwards
-- [ ] 80 - f32 backwards
-- [ ] 80 - f16 forwards
-- [ ] 80 - f16 backwards
-
-*80 for attention inside CLIP*
-
 ## Install
 
 ```bash
@@ -153,6 +136,13 @@ v = torch.randn(32, 2048, 64).cuda()
 
 out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 ```
+
+## Supported head dimensions
+
+- [x] 32
+- [x] 64
+- [x] 96
+- [x] 128
 
 ## Todo
 

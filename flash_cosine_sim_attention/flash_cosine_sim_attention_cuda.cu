@@ -354,6 +354,27 @@ namespace layout {
     };
 
     template<>
+    struct warp<c10::Half, 96, 64, 96> {
+        static constexpr int N_thread = 1;
+        static constexpr int M_thread = 3;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 4;
+        static constexpr int M_block = 2;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 96>::TPB);
+
+        static_assert(N_thread * N_warp * N_block == 64);
+        static_assert(M_thread * M_warp * M_block == 96);
+    };
+
+    template<>
     struct warp<c10::Half, 32, 64, 32> {
         static constexpr int N_thread = 2;
         static constexpr int M_thread = 1;
