@@ -247,12 +247,29 @@ namespace layout {
     };
 
     template<typename scalar_t, int tile_size>
+    struct smem<scalar_t, tile_size, 96> {
+
+        static constexpr int forward_size = (
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
+            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, tile_size, 96>::size             // c
+        );
+
+        static constexpr int backward_size = (
+            mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // q
+            mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // k
+            mem::shared_fragment<scalar_t, tile_size, tile_size>::size +    // c
+            mem::shared_fragment<scalar_t, 1, tile_size>::size              // d
+        );
+    };
+
+    template<typename scalar_t, int tile_size>
     struct smem<scalar_t, tile_size, 128> {
 
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
             mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, tile_size, 128>::size       // c
+            mem::shared_fragment<scalar_t, tile_size, 128>::size            // c
         );
 
         static constexpr int backward_size = (
@@ -1307,7 +1324,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     const int v_dim     = v.size(3);
 
     assert(("query, key, value dimensions must be the same", q_dim == k_dim && k_dim == v_dim));
-    assert(("only dimensions 32, 64, 128 allowed for now", q_dim == 32 || q_dim == 64 || q_dim == 128));
+    assert(("only dimensions 32, 64, 128 allowed for now", q_dim == 32 || q_dim == 64 || q_dim == 96 || q_dim == 128));
     assert(("mask should not be given if causal", !(causal && mask.has_value())));
 
     // derived values
@@ -1336,7 +1353,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
+        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
             const int tile_size = 64;
 
@@ -1463,7 +1480,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
     AT_TYPE_DISPATCH_SWITCH(dk_scalar_type, kv_scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
         AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-            VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
+            VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
                 const int tile_size = 64;
 

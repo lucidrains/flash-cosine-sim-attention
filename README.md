@@ -18,10 +18,9 @@ In other words, stable, fast, memory efficient, and longer context attention wit
 
 - [x] 32
 - [x] 64
+- [x] 96 - f32
 - [x] 128
 
-- [ ] 96 - f32 forwards
-- [ ] 96 - f32 backwards
 - [ ] 96 - f16 forwards
 - [ ] 96 - f16 backwards
 
