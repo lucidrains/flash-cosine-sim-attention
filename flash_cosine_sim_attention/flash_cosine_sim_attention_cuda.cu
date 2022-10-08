@@ -971,7 +971,7 @@ __global__ void backward_preprocess(
 
 // backward kernel
 
-template <typename scalar_t, int tile_size, int dim_head>
+template <typename scalar_t, typename kv_scalar_t, int tile_size, int dim_head>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -980,8 +980,8 @@ __global__ void backward_kernel(
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<float, 4> dq,
-          PackedAccessor<float, 4> dk,
-          PackedAccessor<float, 4> dv,
+          PackedAccessor<kv_scalar_t, 4> dk,
+          PackedAccessor<kv_scalar_t, 4> dv,
           PackedAccessor<float, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out_scaled,
     const PackedAccessor<scalar_t, 3> delta,
@@ -1446,62 +1446,67 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     // create intermediate or output tensors
 
     auto options_kfloat_dtype = options.dtype(torch::kFloat);
+    auto options_q_dtype = options.dtype(q_scalar_type);
 
     auto delta = at::empty({batch, heads, seq}, options.dtype(q_scalar_type));
 
     auto dq = at::zeros_like(q, options_kfloat_dtype);
 
-    auto dk = is_single_head_kv ? at::zeros_like(k, options_kfloat_dtype) : at::empty_like(k, options_kfloat_dtype);
-    auto dv = is_single_head_kv ? at::zeros_like(v, options_kfloat_dtype) : at::empty_like(k, options_kfloat_dtype);
+    auto dk = is_single_head_kv ? at::zeros_like(k, options_kfloat_dtype) : at::empty_like(k, options_q_dtype);
+    auto dv = is_single_head_kv ? at::zeros_like(v, options_kfloat_dtype) : at::empty_like(k, options_q_dtype);
 
     auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias_value, options_kfloat_dtype) : at::empty({attn_bias_value.size(0), 0, 0}, options_kfloat_dtype);
 
+    auto dk_scalar_type = dk.scalar_type();
+
     // setup backwards call
 
-    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
+    AT_TYPE_DISPATCH_SWITCH(dk_scalar_type, kv_scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+        AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+            VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 128), (
 
-            const int tile_size = 64;
+                const int tile_size = 64;
 
-            const dim3 preprocess_threads_per_block(dim_head);
+                const dim3 preprocess_threads_per_block(dim_head);
 
-            const dim3 preprocess_blocks(batch * heads, seq);
+                const dim3 preprocess_blocks(batch * heads, seq);
 
-            backward_preprocess<scalar_t, dim_head><<<preprocess_blocks, preprocess_threads_per_block>>>(
-                ACCESSOR(d_out, 4, scalar_t),
-                ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(delta, 3, scalar_t)
-            );
+                backward_preprocess<scalar_t, dim_head><<<preprocess_blocks, preprocess_threads_per_block>>>(
+                    ACCESSOR(d_out, 4, scalar_t),
+                    ACCESSOR(o, 4, scalar_t),
+                    ACCESSOR(delta, 3, scalar_t)
+                );
 
-            const dim3 backwards_threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
+                const dim3 backwards_threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
 
-            const dim3 backwards_blocks(
-                batch * heads,
-                cdiv(k_seq, tile_size)
-            );
+                const dim3 backwards_blocks(
+                    batch * heads,
+                    cdiv(k_seq, tile_size)
+                );
 
-            backward_kernel<scalar_t, tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
-                ACCESSOR(q, 4, scalar_t),
-                ACCESSOR(k, 4, scalar_t),
-                ACCESSOR(v, 4, scalar_t),
-                ACCESSOR(l, 3, float),
-                ACCESSOR(mask_value, 2, bool),
-                ACCESSOR(attn_bias_value, 3, scalar_t),
-                ACCESSOR(dq, 4, float),
-                ACCESSOR(dk, 4, float),
-                ACCESSOR(dv, 4, float),
-                ACCESSOR(db, 3, float),
-                ACCESSOR(d_out, 4, scalar_t),
-                ACCESSOR(delta, 3, scalar_t),
-                scale,
-                causal,
-                has_mask,
-                has_attn_bias,
-                attn_bias_batch_dim,
-                attn_bias_requires_grad,
-                is_single_head_kv
-            );
+                backward_kernel<scalar_t, kv_scalar_t, tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
+                    ACCESSOR(q, 4, scalar_t),
+                    ACCESSOR(k, 4, scalar_t),
+                    ACCESSOR(v, 4, scalar_t),
+                    ACCESSOR(l, 3, float),
+                    ACCESSOR(mask_value, 2, bool),
+                    ACCESSOR(attn_bias_value, 3, scalar_t),
+                    ACCESSOR(dq, 4, float),
+                    ACCESSOR(dk, 4, kv_scalar_t),
+                    ACCESSOR(dv, 4, kv_scalar_t),
+                    ACCESSOR(db, 3, float),
+                    ACCESSOR(d_out, 4, scalar_t),
+                    ACCESSOR(delta, 3, scalar_t),
+                    scale,
+                    causal,
+                    has_mask,
+                    has_attn_bias,
+                    attn_bias_batch_dim,
+                    attn_bias_requires_grad,
+                    is_single_head_kv
+                );
 
+            ), ())
         ), ())
     ), ())
 
@@ -1523,8 +1528,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     // cast back to original type of queries
 
     dq = dq.to(q_scalar_type);
-    dk = dk.to(q_scalar_type);
-    dv = dv.to(q_scalar_type);
+
+    if (dk_scalar_type != q_scalar_type) {
+        dk = dk.to(q_scalar_type);
+        dv = dv.to(q_scalar_type);
+    }
 
     at::optional<torch::Tensor> return_db;
 
