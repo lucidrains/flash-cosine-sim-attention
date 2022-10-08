@@ -23,6 +23,7 @@ parser.add_argument('--causal', default = False, action = 'store_true')
 parser.add_argument('--mask-prob', type = float, default = 0.)
 parser.add_argument('--only-forwards', default = False, action = 'store_true')
 parser.add_argument('--only-backwards', default = False, action = 'store_true')
+parser.add_argument('--num-times', default = 20, type = int)
 args = parser.parse_args()
 
 # constants
@@ -74,13 +75,15 @@ def simplified_cosine_sim_attention(
 fused_attention_fn = benchmark(
     flash_cosine_sim_attention,
     forwards = TEST_FORWARDS,
-    backwards = TEST_BACKWARDS
+    backwards = TEST_BACKWARDS,
+    num_times = args.num_times
 )
 
 attention_fn = benchmark(
     simplified_cosine_sim_attention,
     forwards = TEST_FORWARDS,
-    backwards = TEST_BACKWARDS
+    backwards = TEST_BACKWARDS,
+    num_times = args.num_times
 )
 
 # all permutations
