@@ -838,12 +838,17 @@ __global__ void forward_kernel(
                 (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
-            if (causal && seq_len_diff == 0 && attn_row == 0 && attn_col == 0)
-                return 1.f;
+            float shift = scale;
+
+            if (causal && seq_len_diff == 0)
+                if (attn_row == 0)
+                    return 1.f;
+
+                shift = min(shift, (float) attn_row);
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return __expf(scale * el + bias - scale);
+            return __expf(scale * el + bias - shift);
         });
 
         if (has_mask)
@@ -1137,12 +1142,17 @@ __global__ void backward_kernel(
                 (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
-            if (causal && seq_len_diff == 0 && attn_row == 0 && attn_col == 0)
-                return 1.f;
+            float shift = scale;
+
+            if (causal && seq_len_diff == 0)
+                if (attn_row == 0)
+                    return 1.f;
+
+                shift = min(shift, (float) attn_row);
 
             bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return __expf(scale * el + bias - scale) * L_sm.smem[row];
+            return __expf(scale * el + bias - shift) * L_sm.smem[row];
         });
 
         if (has_mask)
