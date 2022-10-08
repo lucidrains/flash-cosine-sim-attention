@@ -20,18 +20,23 @@ def cast_tuple(t):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--causal', default = False, action = 'store_true')
+parser.add_argument('--mask-prob', type = float, default = 0.)
 parser.add_argument('--only-forwards', default = False, action = 'store_true')
 parser.add_argument('--only-backwards', default = False, action = 'store_true')
 args = parser.parse_args()
-
-assert not (args.only_forwards and args.only_backwards)
 
 # constants
 
 BATCH_SIZES = 4
 HEADS = 8
 DIM = 64
+
 CAUSAL = args.causal
+SHOULD_MASK = args.mask_prob > 0.
+
+assert args.mask_prob >= 0 and args.mask_prob < 1.
+assert not (args.only_forwards and args.only_backwards)
+assert not (CAUSAL and SHOULD_MASK)
 
 TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192)
 
@@ -46,7 +51,8 @@ def simplified_cosine_sim_attention(
     v,
     scale = 10,
     l2norm_qk = True,
-    causal_mask = None
+    causal_mask = None,
+    mask = None
 ):
     if l2norm_qk:
         q, k = l2norm_tensors(q, k)
@@ -54,9 +60,11 @@ def simplified_cosine_sim_attention(
     sim = einsum(f'b h i d, b h j d -> b h i j', q, k)
     sim = sim * scale
 
+    if exists(mask):
+        sim = sim.masked_fill(~mask[:, None, None, :], -torch.finfo(sim.dtype).max)
+
     if exists(causal_mask):
-        mask_value = -torch.finfo(sim.dtype).max
-        sim = sim.masked_fill(causal_mask, mask_value)
+        sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
 
     attn = sim.softmax(dim = -1)
     return einsum(f'b h i j, b h j d -> b h i d', attn, v)
@@ -104,6 +112,12 @@ for name, dtype in (('float32', torch.float32), ('float16', torch.float16)):
 
             if CAUSAL:
                 baseline_args = {**baseline_args, 'causal_mask': causal_mask}
+
+            if SHOULD_MASK:
+                mask = torch.zeros((batch, seq)).float().cuda().uniform_(0, 1) < args.mask_prob
+
+                fused_args = {**fused_args, 'mask': mask}
+                baseline_args = {**baseline_args, 'mask': mask}
 
             # run benchmarks accounting for oom for baseline
 

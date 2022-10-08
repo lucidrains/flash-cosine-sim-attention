@@ -1270,6 +1270,15 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
 
     // single headed key / values
 
+    bool is_merged_batch_head = q.ndimension() == 3;
+
+    if (is_merged_batch_head) {
+        assert(('if batch and heads are merged for queries, keys and values must also similarly have only 3 dimensions', k.ndimension() == 3 && v.ndimension() == 3));
+
+        attn_bias_batch_dim = true;
+        q = q.unsqueeze(1);
+    }
+
     if (k.ndimension() == 3)
         k = k.unsqueeze(1);
 
@@ -1348,6 +1357,9 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
 
         ), ())
     ), ())
+
+    if (is_merged_batch_head)
+        o = o.squeeze(1);
 
     // handle error    
 
