@@ -132,15 +132,15 @@ namespace mem {
 
         // allow for storing rows
 
-        template<typename accessor, typename F>
-        __device__ void store_row(accessor gmem, int row_offset, int row_tile_size, int row_max, F&& op) {
+        template<typename accessor>
+        __device__ void store_row(accessor gmem, int row_offset, int row_tile_size, int row_max) {
             for (int i = threadIdx.x; i < row_tile_size; i += blockDim.x) {
                 int global_row = row_offset + i;
 
                 if (global_row >= row_max)
                     continue;
 
-                smem[i] = op(gmem[global_row]);
+                smem[i] = gmem[global_row];
             }
         }
     };
@@ -171,10 +171,18 @@ struct rowsum_accumulator {
 
             acc += smem(threadIdx.x, i);
         }
+    }    
+
+    template<typename F>
+    __device__ void pointwise(F&& op) {
+        if (threadIdx.x >= N_tile)
+            return;
+
+        acc = op(acc);
     }
 
-    __device__ void divide(float* smem, out_warp_tile_t& mma) {
-        if (threadIdx.x < N_tile) smem[threadIdx.x] = 1.f / max(acc, 1e-10);
+    __device__ void multiply(float* smem, out_warp_tile_t& mma) {
+        if (threadIdx.x < N_tile) smem[threadIdx.x] = acc;
 
         __syncthreads();
 
@@ -714,7 +722,7 @@ __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
           PackedAccessor<scalar_t, 4> o,
-          PackedAccessor<float, 3> l,
+          PackedAccessor<float, 3> inv_l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
     const float scale,
@@ -777,7 +785,7 @@ __global__ void forward_kernel(
     auto Q_ = q[batch][heads];
     auto K_ = k[batch][kv_heads];
     auto V_ = v[batch][kv_heads];
-    auto l_ = l[batch][heads];
+    auto l_ = inv_l[batch][heads];
     auto O_ = o[batch][heads];
     auto mask_ = mask[batch];
     auto bias_ = attn_bias[attn_bias_batch_dim ? batch : heads];
@@ -814,7 +822,7 @@ __global__ void forward_kernel(
         // store mask into smem if needed
 
         if (has_mask)
-            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len, [](bool el) {return el;});
+            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len);
 
         __syncthreads();
 
@@ -858,10 +866,12 @@ __global__ void forward_kernel(
         }
     }
 
+    L_acc.pointwise([](float el) { return 1.f / max(el, 1e-10); }); // get inverse of rowsums
+
     if (need_store_rowsum)
         L_acc.store(l_, row_tile_offset, row_seq_len);
 
-    L_acc.divide(L_sm.smem, out_mma);
+    L_acc.multiply(L_sm.smem, out_mma);
 
     out_mma.store(O_, O_sm, 0, row_tile_offset, 0, row_seq_len);
 }
@@ -909,7 +919,8 @@ __global__ void backward_preprocess(
 
     // load do_scaled * o into registers
 
-    val = do_[dim_idx] * o_[dim_idx] + do_[dim_idx + blockDim.x] * o_[dim_idx + blockDim.x];
+    if (dim_idx < dim_head)
+        val = do_[dim_idx] * o_[dim_idx];
 
     // warp shuffle reduce
 
@@ -960,7 +971,7 @@ __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
-    const PackedAccessor<float, 3> l,
+    const PackedAccessor<float, 3> inv_l,
     const PackedAccessor<bool, 2> mask,
     const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<float, 4> dq,
@@ -1058,7 +1069,7 @@ __global__ void backward_kernel(
     auto q_ = q[batch_idx][head_idx];
     auto k_ = k[batch_idx][kv_head_idx];
     auto v_ = v[batch_idx][kv_head_idx];
-    auto l_ = l[batch_idx][head_idx];
+    auto l_ = inv_l[batch_idx][head_idx];
     auto dq_ = dq[batch_idx][head_idx];
     auto dk_ = dk[batch_idx][kv_head_idx];
     auto dv_ = dv[batch_idx][kv_head_idx];
@@ -1107,12 +1118,10 @@ __global__ void backward_kernel(
 
         // load rowsums and mask if needed
 
-        L_sm.store_row(l_, row_tile_offset, row_tile_size, row_seq_len, [&](float el) {
-            return 1.f / max(el, 1e-10);
-        });
+        L_sm.store_row(l_, row_tile_offset, row_tile_size, row_seq_len);
 
         if (has_mask)
-            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len, [](float el) {return el;});
+            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len);
 
         __syncthreads();
 
@@ -1170,7 +1179,7 @@ __global__ void backward_kernel(
 
         __syncthreads();
 
-        D_sm.store_row(delta_, row_tile_offset, row_tile_size, row_seq_len, [](scalar_t el) {return el;});
+        D_sm.store_row(delta_, row_tile_offset, row_tile_size, row_seq_len);
 
         __syncthreads();
 
@@ -1422,20 +1431,21 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
             const int tile_size = 64;
 
-            const dim3 backwards_preprocess_threads_per_block(dim_head / 2);
+            const dim3 preprocess_threads_per_block(dim_head);
+
+            const dim3 preprocess_blocks(batch * heads, seq);
+
+            backward_preprocess<scalar_t, dim_head><<<preprocess_blocks, preprocess_threads_per_block>>>(
+                ACCESSOR(d_out, 4, scalar_t),
+                ACCESSOR(o, 4, scalar_t),
+                ACCESSOR(delta, 3, scalar_t)
+            );
+
             const dim3 backwards_threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
 
             const dim3 backwards_blocks(
                 batch * heads,
                 cdiv(k_seq, tile_size)
-            );
-
-            const dim3 backwards_preprocess_blocks(batch * heads, seq);
-
-            backward_preprocess<scalar_t, dim_head><<<backwards_preprocess_blocks, backwards_preprocess_threads_per_block>>>(
-                ACCESSOR(d_out, 4, scalar_t),
-                ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(delta, 3, scalar_t)
             );
 
             backward_kernel<scalar_t, tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(

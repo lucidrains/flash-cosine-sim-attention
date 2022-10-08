@@ -210,7 +210,7 @@ Then
 $ python benchmark.py
 ```
 
-For only benchmarking forwards or backwards, append either `--only-forwards` or `--only-backwards` flag to the above
+For only benchmarking forwards or backwards, append either `--only-forwards` or `--only-backwards` flag to the above. To benchmark autoregressive, append `--causal`
 
 ## Training a small GPT on Enwik8
 

@@ -10,6 +10,9 @@ from flash_cosine_sim_attention import flash_cosine_sim_attention, l2norm_tensor
 
 # helper functions
 
+def exists(t):
+    return t is not None
+
 def cast_tuple(t):
     return t if isinstance(t, tuple) else (t,)
 
@@ -42,8 +45,8 @@ def simplified_cosine_sim_attention(
     k,
     v,
     scale = 10,
-    causal = False,
-    l2norm_qk = True
+    l2norm_qk = True,
+    causal_mask = None
 ):
     if l2norm_qk:
         q, k = l2norm_tensors(q, k)
@@ -51,9 +54,8 @@ def simplified_cosine_sim_attention(
     sim = einsum(f'b h i d, b h j d -> b h i j', q, k)
     sim = sim * scale
 
-    if causal:
+    if exists(causal_mask):
         mask_value = -torch.finfo(sim.dtype).max
-        causal_mask = torch.ones(sim.shape[-2:], device = q.device, dtype = torch.bool).triu(1)
         sim = sim.masked_fill(causal_mask, mask_value)
 
     attn = sim.softmax(dim = -1)
@@ -95,10 +97,20 @@ for name, dtype in (('float32', torch.float32), ('float16', torch.float16)):
             k = torch.randn(batch, heads, seq, dim, dtype = dtype).cuda().requires_grad_()
             v = torch.randn(batch, heads, seq, dim, dtype = dtype).cuda().requires_grad_()
 
-            fused_time = fused_attention_fn(q, k, v, causal = CAUSAL)
+            causal_mask = torch.ones((seq, seq), dtype = torch.bool).cuda().triu(1)
+
+            fused_args = dict(causal = CAUSAL)
+            baseline_args = dict()
+
+            if CAUSAL:
+                baseline_args = {**baseline_args, 'causal_mask': causal_mask}
+
+            # run benchmarks accounting for oom for baseline
+
+            fused_time = fused_attention_fn(q, k, v, **fused_args)
 
             try:
-                baseline_time = attention_fn(q, k, v, causal = CAUSAL)
+                baseline_time = attention_fn(q, k, v, **baseline_args)
             except:
                 torch.cuda.empty_cache()
                 baseline_time = -1

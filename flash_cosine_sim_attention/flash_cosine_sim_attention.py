@@ -146,7 +146,7 @@ class FlashCosineSimAttention(Function):
         causal,
         attn_bias_batch_dim
     ):
-        o, l, should_backwards = forward(
+        o, inv_l, should_backwards = forward(
             q, k, v,
             mask,
             attn_bias,
@@ -160,7 +160,7 @@ class FlashCosineSimAttention(Function):
 
         ctx.should_backwards = should_backwards
 
-        ctx.save_for_backward(o, l, q, k, v, mask, attn_bias)
+        ctx.save_for_backward(o, inv_l, q, k, v, mask, attn_bias)
 
         ctx.params = (
             scale,
@@ -174,7 +174,7 @@ class FlashCosineSimAttention(Function):
     def backward(ctx, do):
         assert ctx.should_backwards
 
-        o, l, q, k, v, mask, attn_bias = ctx.saved_tensors
+        o, inv_l, q, k, v, mask, attn_bias = ctx.saved_tensors
 
         (
             scale,
@@ -183,7 +183,7 @@ class FlashCosineSimAttention(Function):
         ) = ctx.params
 
         dq, dk, dv, db = backward(
-            do, o, l,
+            do, o, inv_l,
             q, k, v,
             mask,
             attn_bias,
