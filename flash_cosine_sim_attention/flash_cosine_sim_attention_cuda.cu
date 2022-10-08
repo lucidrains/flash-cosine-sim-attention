@@ -1390,8 +1390,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
     // single headed key / values
 
+    bool q_no_heads = q.ndimension() == 3;
     bool k_no_heads = k.ndimension() == 3;
     bool v_no_heads = v.ndimension() == 3;
+
+    if (q_no_heads)
+        q = q.unsqueeze(1);
+
+    if (o.ndimension() == 3)
+        o = o.unsqueeze(1);
+
+    if (d_out.ndimension() == 3)
+        d_out = d_out.unsqueeze(1);
 
     if (k_no_heads)
         k = k.unsqueeze(1);
@@ -1490,6 +1500,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     CHECK_LAST_CUDA_ERROR(true);
 
     // deal with single headed kv
+
+    if (q_no_heads)
+        dq = dq.squeeze(1);
 
     if (k_no_heads)
         dk = dk.squeeze(1);
