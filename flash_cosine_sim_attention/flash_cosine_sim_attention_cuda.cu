@@ -6,6 +6,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
+#include <tuple>
 #include "dispatch.h"
 
 // error handler
@@ -1243,42 +1244,66 @@ __global__ void backward_kernel(
 
 // forwards c++ function
 
-std::vector<at::Tensor> flash_cosine_sim_attention_forward(
+std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
-    torch::Tensor mask,
-    torch::Tensor attn_bias,
+    at::optional<torch::Tensor> mask,
+    at::optional<torch::Tensor> attn_bias,
     bool attn_bias_batch_dim,
     float scale,
-    bool causal,
-    bool need_store_rowsum
+    bool causal
 ) {
     auto q_scalar_type = q.scalar_type();
     auto query_device = device_of(q);
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
 
-    // dimensions and derived values
+    // single headed key / values
+
+    if (k.ndimension() == 3)
+        k = k.unsqueeze(1);
+
+    if (v.ndimension() == 3)
+        v = v.unsqueeze(1);
+
+    // dimensions
 
     const int batch     = q.size(0);
     const int heads     = q.size(1);
     const int kv_heads  = k.size(1);
     const int q_seq_len = q.size(2);
     const int k_seq_len = k.size(2);
-    const int k_dim     = q.size(3);
+    const int q_dim     = q.size(3);
+    const int k_dim     = k.size(3);
     const int v_dim     = v.size(3);
 
-    const bool is_single_head_kv = heads > 1 && kv_heads == 1;
-    const bool has_attn_bias     = !!attn_bias.numel();
-    const bool has_mask          = !!mask.numel();
+    assert(("query, key, value dimensions must be the same", q_dim == k_dim && k_dim == v_dim));
+    assert(("only dimensions 32, 64, 128 allowed for now", q_dim == 32 || q_dim == 64 || q_dim == 128));
+    assert(("mask should not be given if causal", !(causal && mask.has_value())));
 
-    // create intermediate or output tensors
+    // derived values
+
+    const bool is_single_head_kv = heads > 1 && kv_heads == 1;
+
+    const bool has_attn_bias     = attn_bias.has_value();
+    const bool has_mask          = mask.has_value();
 
     auto options = torch::TensorOptions().device(query_device);
 
+    // optionals
+
+    auto mask_value = has_mask ? mask.value() : at::empty({batch, 0}, options.dtype(torch::kBool));
+    auto attn_bias_value = has_attn_bias ? attn_bias.value() : at::empty({1, 0, 0}, options.dtype(q_scalar_type));
+
+    // should backwards, determines whether to store row sum
+
+    bool should_backwards = q.requires_grad() || k.requires_grad() || v.requires_grad() || attn_bias_value.requires_grad();
+
+    // create intermediate or output tensors
+
     auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
-    auto l = at::empty({batch, heads, need_store_rowsum ? q_seq_len : 0}, options.dtype(at::kFloat));
+    auto l = at::empty({batch, heads, should_backwards ? q_seq_len : 0}, options.dtype(at::kFloat));
 
     // dispatch forward call
 
@@ -1301,14 +1326,14 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
                 ACCESSOR(v, 4, scalar_t),
                 ACCESSOR(o, 4, scalar_t),
                 ACCESSOR(l, 3, float),
-                ACCESSOR(mask, 2, bool),
-                ACCESSOR(attn_bias, 3, scalar_t),
+                ACCESSOR(mask_value, 2, bool),
+                ACCESSOR(attn_bias_value, 3, scalar_t),
                 scale,
                 causal,
                 has_mask,
                 has_attn_bias,
                 attn_bias_batch_dim,
-                need_store_rowsum,
+                should_backwards,
                 is_single_head_kv
             );
 
@@ -1319,29 +1344,39 @@ std::vector<at::Tensor> flash_cosine_sim_attention_forward(
 
     CHECK_LAST_CUDA_ERROR(true);
 
-    return { o, l };
+    return { o, l, should_backwards};
 }
 
 // backwards c++ function
 
-std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tensor>> flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
     torch::Tensor l,
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
-    torch::Tensor mask,
-    torch::Tensor attn_bias,
+    at::optional<torch::Tensor> mask,
+    at::optional<torch::Tensor> attn_bias,
     bool attn_bias_batch_dim,
     float scale,
-    bool causal,
-    bool attn_bias_requires_grad
+    bool causal
 ) {
     auto q_scalar_type = q.scalar_type();
     auto query_device = device_of(q);
 
     const at::cuda::OptionalCUDAGuard device_guard(query_device);
+
+    // single headed key / values
+
+    bool k_no_heads = k.ndimension() == 3;
+    bool v_no_heads = v.ndimension() == 3;
+
+    if (k_no_heads)
+        k = k.unsqueeze(1);
+
+    if (v_no_heads)
+        v = v.unsqueeze(1);
 
     // dimensions and derived values
 
@@ -1354,21 +1389,31 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     const int v_dim    = v.size(3);
 
     const bool is_single_head_kv = heads > 1 && kv_heads == 1;
-    const bool has_attn_bias     = !!attn_bias.numel();
-    const bool has_mask          = !!mask.numel();
+
+    const bool has_attn_bias     = attn_bias.has_value();
+    const bool has_mask          = mask.has_value();
+
+    const bool attn_bias_requires_grad = has_attn_bias && attn_bias.value().requires_grad();
+
+    auto options = torch::TensorOptions().device(query_device);
+
+    // optionals
+
+    auto mask_value = has_mask ? mask.value() : at::empty({batch, 0}, options.dtype(torch::kBool));
+    auto attn_bias_value = has_attn_bias ? attn_bias.value() : at::empty({1, 0, 0}, options.dtype(q_scalar_type));
 
     // create intermediate or output tensors
 
-    auto options = torch::TensorOptions().device(query_device);
     auto options_kfloat_dtype = options.dtype(torch::kFloat);
 
     auto delta = at::empty({batch, heads, seq}, options.dtype(q_scalar_type));
 
     auto dq = at::zeros_like(q, options_kfloat_dtype);
-    auto dk = at::zeros_like(k, options_kfloat_dtype);
-    auto dv = at::zeros_like(v, options_kfloat_dtype);
 
-    auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias, options_kfloat_dtype) : at::empty({attn_bias.size(0), 0, 0}, options_kfloat_dtype);
+    auto dk = is_single_head_kv ? at::zeros_like(k, options_kfloat_dtype) : at::empty_like(k, options_kfloat_dtype);
+    auto dv = is_single_head_kv ? at::zeros_like(v, options_kfloat_dtype) : at::empty_like(k, options_kfloat_dtype);
+
+    auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias_value, options_kfloat_dtype) : at::empty({attn_bias_value.size(0), 0, 0}, options_kfloat_dtype);
 
     // setup backwards call
 
@@ -1398,8 +1443,8 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
                 ACCESSOR(l, 3, float),
-                ACCESSOR(mask, 2, bool),
-                ACCESSOR(attn_bias, 3, scalar_t),
+                ACCESSOR(mask_value, 2, bool),
+                ACCESSOR(attn_bias_value, 3, scalar_t),
                 ACCESSOR(dq, 4, float),
                 ACCESSOR(dk, 4, float),
                 ACCESSOR(dv, 4, float),
@@ -1422,6 +1467,14 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
 
     CHECK_LAST_CUDA_ERROR(true);
 
+    // deal with single headed kv
+
+    if (k_no_heads)
+        dk = dk.squeeze(1);
+
+    if (v_no_heads)
+        dv = dv.squeeze(1);
+
     // cast back to original type of queries
 
     dq = dq.to(q_scalar_type);
@@ -1431,7 +1484,7 @@ std::vector<torch::Tensor> flash_cosine_sim_attention_backward(
     if (has_attn_bias)
         db = db.to(q_scalar_type);
 
-    return { dq, dk, dv, db };
+    return { dq, dk, dv, db};
 }
 
 // bind

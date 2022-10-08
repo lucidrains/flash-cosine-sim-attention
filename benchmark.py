@@ -1,10 +1,12 @@
-import torch
 import argparse
 from itertools import product
-from flash_cosine_sim_attention.benchmark import benchmark
-from flash_cosine_sim_attention import plain_cosine_sim_attention, flash_cosine_sim_attention
 
+import torch
+from torch import einsum
 assert torch.cuda.is_available(), 'cuda must be available to run benchmark'
+
+from flash_cosine_sim_attention.benchmark import benchmark
+from flash_cosine_sim_attention import flash_cosine_sim_attention, l2norm_tensors
 
 # helper functions
 
@@ -33,6 +35,31 @@ TEST_SEQUENCE_LENGTHS = (128, 256, 512, 1024, 2048, 4096, 8192)
 TEST_FORWARDS = not args.only_backwards
 TEST_BACKWARDS = not args.only_forwards
 
+# simplified cosine sim attention for benchmarking
+
+def simplified_cosine_sim_attention(
+    q,
+    k,
+    v,
+    scale = 10,
+    causal = False,
+    l2norm_qk = True
+):
+    if l2norm_qk:
+        q, k = l2norm_tensors(q, k)
+
+    sim = einsum(f'b h i d, b h j d -> b h i j', q, k)
+    sim = sim * scale
+
+    if causal:
+        mask_value = -torch.finfo(sim.dtype).max
+        causal_mask = torch.ones(sim.shape[-2:], device = q.device, dtype = torch.bool).triu(1)
+        sim = sim.masked_fill(causal_mask, mask_value)
+
+    attn = sim.softmax(dim = -1)
+    return einsum(f'b h i j, b h j d -> b h i d', attn, v)
+
+# create benchmark function
 
 fused_attention_fn = benchmark(
     flash_cosine_sim_attention,
@@ -41,7 +68,7 @@ fused_attention_fn = benchmark(
 )
 
 attention_fn = benchmark(
-    plain_cosine_sim_attention,
+    simplified_cosine_sim_attention,
     forwards = TEST_FORWARDS,
     backwards = TEST_BACKWARDS
 )
