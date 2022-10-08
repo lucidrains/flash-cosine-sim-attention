@@ -205,6 +205,86 @@ $ python benchmark.py
 
 For only benchmarking forwards or backwards, append either `--only-forwards` or `--only-backwards` flag to the above. To benchmark autoregressive, append `--causal`
 
+## Benchmarks - wip
+
+### GTX 2080 Ti
+
+Slower than baseline, but this is to be expected on older graphics cards. F16 slightly faster
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 1.05x   kernel: 0.83ms  baseline: 0.79ms
+seq_len: 256    slower: 1.34x   kernel: 1.26ms  baseline: 0.95ms
+seq_len: 512    slower: 1.44x   kernel: 3.14ms  baseline: 2.18ms
+seq_len: 1024   slower: 1.15x   kernel: 7.83ms  baseline: 6.81ms
+seq_len: 2048   slower: 1.20x   kernel: 28.83ms baseline: 24.03ms
+seq_len: 4096   slower: 1.20x   kernel: 111.13ms    baseline: 92.51ms
+seq_len: 8192   slower: 0.00x   kernel: 441.70ms    baseline: oom
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.89x   kernel: 0.68ms  baseline: 0.77ms
+seq_len: 256    slower: 1.03x   kernel: 0.80ms  baseline: 0.77ms
+seq_len: 512    slower: 1.06x   kernel: 1.16ms  baseline: 1.10ms
+seq_len: 1024   slower: 0.93x   kernel: 2.94ms  baseline: 3.16ms
+seq_len: 2048   slower: 0.93x   kernel: 10.06ms baseline: 10.87ms
+seq_len: 4096   slower: 0.93x   kernel: 37.09ms baseline: 39.96ms
+seq_len: 8192   slower: 0.00x   kernel: 143.13ms    baseline: oom
+```
+
+For autoregressive, a clear win `python benchmark.py --causal`
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.97x   kernel: 0.81ms  baseline: 0.84ms
+seq_len: 256    slower: 1.07x   kernel: 1.12ms  baseline: 1.05ms
+seq_len: 512    slower: 0.83x   kernel: 2.23ms  baseline: 2.68ms
+seq_len: 1024   slower: 0.55x   kernel: 4.83ms  baseline: 8.82ms
+seq_len: 2048   slower: 0.49x   kernel: 15.89ms baseline: 32.68ms
+seq_len: 4096   slower: 0.46x   kernel: 57.50ms baseline: 126.00ms
+seq_len: 8192   slower: 0.00x   kernel: 224.76ms    baseline: oom
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.82x   kernel: 0.69ms  baseline: 0.84ms
+seq_len: 256    slower: 0.95x   kernel: 0.79ms  baseline: 0.83ms
+seq_len: 512    slower: 0.78x   kernel: 1.06ms  baseline: 1.37ms
+seq_len: 1024   slower: 0.50x   kernel: 2.10ms  baseline: 4.24ms
+seq_len: 2048   slower: 0.37x   kernel: 5.85ms  baseline: 15.92ms
+seq_len: 4096   slower: 0.31x   kernel: 19.80ms baseline: 64.42ms
+seq_len: 8192   slower: 0.00x   kernel: 75.25ms baseline: oom
+
+```
+
+For variable length sequences with masking, also a clear win. Assume on average 25% of tokens masked out `python benchmark.py --mask-prob 0.25`
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.96x   kernel: 0.82ms  baseline: 0.86ms
+seq_len: 256    slower: 1.19x   kernel: 1.26ms  baseline: 1.06ms
+seq_len: 512    slower: 1.23x   kernel: 3.15ms  baseline: 2.56ms
+seq_len: 1024   slower: 0.90x   kernel: 7.89ms  baseline: 8.79ms
+seq_len: 2048   slower: 0.90x   kernel: 28.98ms baseline: 32.26ms
+seq_len: 4096   slower: 0.90x   kernel: 111.41ms    baseline: 124.14ms
+seq_len: 8192   slower: 0.00x   kernel: 442.79ms    baseline: oom
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.80x   kernel: 0.69ms  baseline: 0.86ms
+seq_len: 256    slower: 0.94x   kernel: 0.81ms  baseline: 0.86ms
+seq_len: 512    slower: 0.85x   kernel: 1.18ms  baseline: 1.39ms
+seq_len: 1024   slower: 0.70x   kernel: 2.98ms  baseline: 4.27ms
+seq_len: 2048   slower: 0.66x   kernel: 10.15ms baseline: 15.35ms
+seq_len: 4096   slower: 0.65x   kernel: 37.49ms baseline: 58.10ms
+seq_len: 8192   slower: 0.00x   kernel: 144.23ms    baseline: oom
+```
+
 ## Training a small GPT on Enwik8
 
 ```bash
