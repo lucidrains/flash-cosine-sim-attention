@@ -192,8 +192,6 @@ class FlashCosineSimAttention(Function):
             causal
         )
 
-        db = db if exists(attn_bias) and attn_bias.requires_grad else None
-
         return dq, dk, dv, None, db, None, None, None, None, None, None, None, None, None, None
 
 flash_cosine_sim_attention_cuda = FlashCosineSimAttention.apply

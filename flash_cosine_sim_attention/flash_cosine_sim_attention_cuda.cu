@@ -1481,10 +1481,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     dk = dk.to(q_scalar_type);
     dv = dv.to(q_scalar_type);
 
-    if (has_attn_bias)
-        db = db.to(q_scalar_type);
+    at::optional<torch::Tensor> return_db;
 
-    return { dq, dk, dv, db};
+    if (has_attn_bias)
+        return_db = db.to(q_scalar_type);
+
+    return { dq, dk, dv, return_db };
 }
 
 // bind
