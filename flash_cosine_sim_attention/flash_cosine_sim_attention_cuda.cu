@@ -229,54 +229,54 @@ namespace layout {
 
     // shared memory sizes that depends on layout, if needed
 
-    template<typename scalar_t, int tile_size, int dim_head>
+    template<typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
     struct smem {
 
         static constexpr int forward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, tile_size, tile_size>::size      // c
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size  // c
         );
 
         static constexpr int backward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // q
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +    // k
-            mem::shared_fragment<scalar_t, tile_size, tile_size>::size +     // c
-            mem::shared_fragment<scalar_t, 1, tile_size>::size               // d
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +    // q
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +    // k
+            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size + // c
+            mem::shared_fragment<scalar_t, 1, row_tile_size>::size               // d
         );
     };
 
-    template<typename scalar_t, int tile_size>
-    struct smem<scalar_t, tile_size, 96> {
+    template<typename scalar_t, int row_tile_size, int col_tile_size>
+    struct smem<scalar_t, row_tile_size, col_tile_size, 96> {
 
         static constexpr int forward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, tile_size, 96>::size             // c
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, row_tile_size, 96>::size             // c
         );
 
         static constexpr int backward_size = (
             mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // q
             mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // k
-            mem::shared_fragment<scalar_t, tile_size, tile_size>::size +    // c
-            mem::shared_fragment<scalar_t, 1, tile_size>::size              // d
+            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size +    // c
+            mem::shared_fragment<scalar_t, 1, row_tile_size>::size              // d
         );
     };
 
-    template<typename scalar_t, int tile_size>
-    struct smem<scalar_t, tile_size, 128> {
+    template<typename scalar_t, int row_tile_size, int col_tile_size>
+    struct smem<scalar_t, row_tile_size, col_tile_size, 128> {
 
         static constexpr int forward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, tile_size, 128>::size            // c
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
+            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, row_tile_size, 128>::size            // c
         );
 
         static constexpr int backward_size = (
             mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // q
             mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // k
-            mem::shared_fragment<scalar_t, tile_size, tile_size>::size +     // c
-            mem::shared_fragment<scalar_t, 1, tile_size>::size               // d
+            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size +     // c
+            mem::shared_fragment<scalar_t, 1, row_tile_size>::size               // d
         );
     };
 
@@ -754,7 +754,7 @@ namespace mma {
 
 // forward kernel
 
-template <typename scalar_t, int tile_size, int dim_head>
+template <typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -782,12 +782,12 @@ __global__ void forward_kernel(
     const int seq_len_diff = col_seq_len - row_seq_len;
 
     constexpr int chunk_size = 16;
-    const int row_tile_offset = blockIdx.x * tile_size;
+    const int row_tile_offset = blockIdx.x * row_tile_size;
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, tile_size, tile_size>;
-    using out_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, row_tile_size, col_tile_size>;
+    using out_mma_t = mma::warp_tile<scalar_t, dim_head, row_tile_size, dim_head>;
 
     float bias;
 
@@ -797,16 +797,16 @@ __global__ void forward_kernel(
 
     // shared memory
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
-    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
+    using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
-    using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
-    using mask_sm_t = mem::shared_fragment<bool, 2, tile_size>;
-    using L_sm_t = mem::shared_fragment<float, tile_size, 1>;
-    using O_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
+    using C_sm_t = mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>;
+    using mask_sm_t = mem::shared_fragment<bool, 2, col_tile_size>;
+    using L_sm_t = mem::shared_fragment<float, row_tile_size, 1>;
+    using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, tile_size, dim_head>::forward_size];
+    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>::forward_size];
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
@@ -827,11 +827,6 @@ __global__ void forward_kernel(
     auto O_ = o[batch][heads];
     auto mask_ = mask[batch];
     auto bias_ = attn_bias[attn_bias_batch_dim ? batch : heads];
-
-    // renamed vars
-
-    auto col_tile_size = tile_size;
-    auto row_tile_size = tile_size;
 
     // zero accumulators
 
@@ -1009,7 +1004,7 @@ __global__ void backward_preprocess(
 
 // backward kernel
 
-template <typename scalar_t, typename kv_scalar_t, int tile_size, int dim_head>
+template <typename scalar_t, typename kv_scalar_t, int row_tile_size, int col_tile_size, int dim_head>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -1048,10 +1043,10 @@ __global__ void backward_kernel(
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, tile_size, tile_size>;
-    using dV_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
-    using dK_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
-    using dQ_mma_t = mma::warp_tile<scalar_t, dim_head, tile_size, dim_head>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, row_tile_size, col_tile_size>;
+    using dV_mma_t = mma::warp_tile<scalar_t, dim_head, col_tile_size, dim_head>;
+    using dK_mma_t = mma::warp_tile<scalar_t, dim_head, col_tile_size, dim_head>;
+    using dQ_mma_t = mma::warp_tile<scalar_t, dim_head, row_tile_size, dim_head>;
 
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
@@ -1060,26 +1055,26 @@ __global__ void backward_kernel(
 
     // shared memory
 
-    using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
     using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
-    using L_sm_t = mem::shared_fragment<float, 1, tile_size>;
-    using D_sm_t = mem::shared_fragment<scalar_t, 1, tile_size>;
+    using L_sm_t = mem::shared_fragment<float, 1, row_tile_size>;
+    using D_sm_t = mem::shared_fragment<scalar_t, 1, row_tile_size>;
 
-    using K_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using K_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using K_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
-    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
 
     using DO_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
-    using DO_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, tile_size>;
+    using DO_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
 
-    using C_sm_t = mem::shared_fragment<scalar_t, tile_size, tile_size>;
-    using mask_sm_t = mem::shared_fragment<bool, 1, tile_size>;
+    using C_sm_t = mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>;
+    using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size>;
 
-    using DK_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
-    using DV_sm_t = mem::shared_fragment<scalar_t, tile_size, dim_head>;
+    using DK_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
+    using DV_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, tile_size, dim_head>::backward_size];
+    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>::backward_size];
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
@@ -1094,13 +1089,13 @@ __global__ void backward_kernel(
     DK_sm_t DK_sm{__shared_mem};
     DV_sm_t DV_sm{__shared_mem};
 
-    auto next_ptr = (dim_head > tile_size) ? DO_sm.next() : DO_sm_t.next();
+    auto next_ptr = (dim_head > row_tile_size) ? DO_sm.next() : DO_sm_t.next();
 
     K_sm_ K_sm{next_ptr};
     K_sm_t_ K_sm_t{next_ptr};
     V_sm_t V_sm{next_ptr};
 
-    auto next_ptr_ = (dim_head > tile_size) ? K_sm.next() : K_sm_t.next();
+    auto next_ptr_ = (dim_head > row_tile_size) ? K_sm.next() : K_sm_t.next();
 
     D_sm_t D_sm{next_ptr_};
 
@@ -1128,11 +1123,6 @@ __global__ void backward_kernel(
     // variables
 
     float bias;
-
-    // tiles
-
-    auto col_tile_size = tile_size;
-    auto row_tile_size = tile_size;
 
     // loop over column tiles
 
@@ -1376,17 +1366,18 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
-            const int tile_size = 64;
+            const int row_tile_size = 64;
+            const int col_tile_size = 64;
 
             const dim3 threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
 
             const dim3 blocks(
-                cdiv(q_seq_len, tile_size),
+                cdiv(q_seq_len, row_tile_size),
                 batch,
                 heads
             );
 
-            forward_kernel<scalar_t, tile_size, dim_head><<<blocks, threads_per_block>>>(
+            forward_kernel<scalar_t, row_tile_size, col_tile_size, dim_head><<<blocks, threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
@@ -1503,7 +1494,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
         AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
             VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
-                const int tile_size = 64;
+                const int row_tile_size = 64;
+                const int col_tile_size = 64;
 
                 const dim3 preprocess_threads_per_block(dim_head);
 
@@ -1519,10 +1511,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
                 const dim3 backwards_blocks(
                     batch * heads,
-                    cdiv(k_seq, tile_size)
+                    cdiv(k_seq, col_tile_size)
                 );
 
-                backward_kernel<scalar_t, kv_scalar_t, tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
+                backward_kernel<scalar_t, kv_scalar_t, row_tile_size, col_tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
                     ACCESSOR(q, 4, scalar_t),
                     ACCESSOR(k, 4, scalar_t),
                     ACCESSOR(v, 4, scalar_t),
