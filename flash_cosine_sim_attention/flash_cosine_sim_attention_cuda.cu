@@ -222,11 +222,6 @@ namespace layout {
         static constexpr int TPB = 256;
     };
 
-    template<>
-    struct tpb<c10::Half, 32> {
-        static constexpr int TPB = 128;
-    };
-
     // shared memory sizes that depends on layout, if needed
 
     template<typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
@@ -376,13 +371,13 @@ namespace layout {
 
     template<>
     struct warp<c10::Half, 32, 64, 32> {
-        static constexpr int N_thread = 2;
+        static constexpr int N_thread = 1;
         static constexpr int M_thread = 1;
 
         static constexpr int N_warp = 16;
         static constexpr int M_warp = 16;
 
-        static constexpr int N_block = 2;
+        static constexpr int N_block = 4;
         static constexpr int M_block = 2;
 
         static constexpr int K_tile = 16;
@@ -397,13 +392,13 @@ namespace layout {
 
     template<>
     struct warp<c10::Half, 32, 64, 64> {
-        static constexpr int N_thread = 2;
+        static constexpr int N_thread = 1;
         static constexpr int M_thread = 2;
 
         static constexpr int N_warp = 16;
         static constexpr int M_warp = 16;
 
-        static constexpr int N_block = 2;
+        static constexpr int N_block = 4;
         static constexpr int M_block = 2;
 
         static constexpr int K_tile = 16;
