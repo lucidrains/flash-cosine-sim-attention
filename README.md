@@ -152,13 +152,13 @@ out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 
 ## Todo
 
-- [ ] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
-- [ ] support O(n) 1d dynamic positional bias
+- [ ] test out 64x96 tiles on f16
 - [ ] bfloat16 support, use sfinae as recommended by Arthur
 - [ ] flexible which type is used for accumulation
 - [ ] allow for flexible definition of whether warp tile atomic adds to float or half
-- [ ] test out 64x96 tiles on f16
+- [ ] support O(n) 1d dynamic positional bias
 
+- [x] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 - [x] figure out how to dispatch differently for architectures (say A100), in case backwards can make use of the increase in shared memory differently
 - [x] decouple row and column sizes for attention tiles
 - [x] dk and dv are now in f16 when it can be (non single headed kv)

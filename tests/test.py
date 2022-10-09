@@ -17,6 +17,15 @@ def allclose(a, b, atol = 1e-4):
 
     return diff <= atol
 
+def exists(t):
+    return t is not None
+
+def maybe_cpu(t):
+    if not exists(t):
+        return None
+
+    return t.cpu()
+
 # tests
 
 @pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
@@ -114,3 +123,39 @@ def test_grad_equal(
     if attn_bias:
         assert not_nan_or_infs(fdb)
         assert allclose(db, fdb, atol = atol)
+
+# test cpu
+
+@pytest.mark.parametrize('causal,mask', [(True, False), (False, True), (False, False)])
+@pytest.mark.parametrize('attn_bias', [True, False])
+@pytest.mark.parametrize('seq_len', [63, 127])
+@pytest.mark.parametrize('dim_head', [32, 64, 96, 128])
+@pytest.mark.parametrize('float16', [False, True])
+@pytest.mark.parametrize('attn_bias_batch_dim', [False, True])
+@pytest.mark.parametrize('single_head_kv', [False, True])
+def test_output_equal_cuda_and_cpu_forward(
+    causal,
+    mask,
+    attn_bias,
+    seq_len,
+    dim_head,
+    float16,
+    attn_bias_batch_dim,
+    single_head_kv
+):
+    batch, heads = 4, 8
+    dtype, atol = (torch.float16, 1e-1) if float16 else (torch.float32, 1e-4)
+
+    kv_shape = (batch, heads, seq_len, dim_head) if not single_head_kv else (batch, seq_len, dim_head)
+
+    q = torch.randn(batch, heads, seq_len, dim_head, dtype = dtype).cuda()
+    k = torch.randn(kv_shape, dtype = dtype).cuda()
+    v = torch.randn(kv_shape, dtype = dtype).cuda()
+
+    attn_mask = torch.randint(0, 2, (batch, seq_len), dtype = torch.bool).cuda() if mask else None
+    bias = torch.randn(batch if attn_bias_batch_dim else heads, seq_len, seq_len, dtype = dtype).cuda() if attn_bias else None
+
+    flash_output = flash_cosine_sim_attention(q, k, v, causal = causal, mask = attn_mask, attn_bias = bias, attn_bias_batch_dim = attn_bias_batch_dim)
+    flash_output_cpu = flash_cosine_sim_attention(q.cpu(), k.cpu(), v.cpu(), causal = causal, mask = maybe_cpu(attn_mask), attn_bias = maybe_cpu(bias), attn_bias_batch_dim = attn_bias_batch_dim)
+
+    assert allclose(flash_output.cpu(), flash_output_cpu, atol = atol)

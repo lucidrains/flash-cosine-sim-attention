@@ -1,6 +1,6 @@
+import math
 import importlib
 from functools import partial, wraps
-from typing import Optional
 
 import torch
 from torch import einsum
@@ -33,8 +33,17 @@ def default(val, d):
 def divisible_by(numer, denom):
     return (numer % denom) == 0
 
+def l2norm_cpu(t):
+    eps = 1e-12 if t.dtype == torch.float32 else 1e-3
+    norm = t.norm(dim = -1)
+    norm_clamped = torch.where(norm > eps, norm, eps)
+    return t / norm_clamped[..., None]
+
 def l2norm(t):
-    return F.normalize(t, dim = -1)
+    if t.data.is_cuda:
+        return F.normalize(t, dim = -1)
+
+    return l2norm_cpu(t)
 
 def l2norm_tensors(*tensors):
     assert len(tensors) > 0
@@ -102,6 +111,119 @@ def plain_cosine_sim_attention(
         out = out.squeeze(1)
 
     return out
+
+# cpu forwards
+
+def flash_cosine_sim_attention_cpu(
+    q, k, v,
+    mask,
+    attn_bias,
+    scale,
+    causal,
+    attn_bias_batch_dim,
+    row_tile_size = 512,
+    col_tile_size = 512
+):
+    needs_backwards = any([exists(t) and t.requires_grad for t in (q, k, v, attn_bias)])
+
+    assert not needs_backwards, 'cpu version does not support backwards'
+    assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
+
+    dtype = q.dtype
+    q, k, v = q.float(), k.float(), v.float()
+
+    is_merged_batch_heads_query = q.ndim == 3
+    single_head_kv = k.ndim == 3
+
+    shape = q.shape
+    col_seq_len = k.shape[-2]
+    row_seq_len = q.shape[-2]
+    seq_len_diff = col_seq_len - row_seq_len
+    row_tiles = math.ceil(row_seq_len / row_tile_size)
+    col_tiles = math.ceil(col_seq_len / col_tile_size)
+    max_neg_value = -torch.finfo(q.dtype).max
+
+    if is_merged_batch_heads_query:
+        assert k.ndim == 3 and v.ndim ==3, 'if batch and heads are merged for queries, keys and values must also similarly have only 3 dimensions'
+
+        attn_bias_batch_dim = True
+        q = q.unsqueeze(1)
+
+    if exists(attn_bias):
+        attn_bias = attn_bias.unsqueeze(1 if attn_bias_batch_dim else 0)
+
+    kv_einsum_eq = 'b j d' if single_head_kv else 'b h j d'
+
+    # loop over rows and columns
+
+    o = torch.zeros_like(q)
+    l = torch.zeros((*q.shape[:-1], 1))
+
+    # prepare mask
+
+    if not exists(mask):
+        mask = (None,) * col_tiles
+    else:
+        mask = mask[:, None, None, :]
+        mask = mask.split(col_tile_size, dim = -1)
+
+    if not exists(attn_bias):
+        attn_bias = (None,) * row_tiles
+    else:
+        attn_bias = attn_bias.split(row_tile_size, dim = -2)
+
+    row_splits = zip(
+        q.split(row_tile_size, dim = -2),
+        o.split(row_tile_size, dim = -2),
+        l.split(row_tile_size, dim = -2),
+        attn_bias
+    )
+
+    for ind, (qc, oc, lc, bc) in enumerate(row_splits):
+        row_chunk_size = qc.shape[-2]
+        q_start_index = ind * row_tile_size + seq_len_diff
+
+        if not exists(bc):
+            bc = (None,) * col_tiles
+        else:
+            bc = bc.split(col_tile_size, dim = -1)
+
+        col_splits = zip(
+            k.split(col_tile_size, dim = -2),
+            v.split(col_tile_size, dim = -2),
+            mask,
+            bc
+        )
+
+        for k_ind, (kc, vc, maskc, bias) in enumerate(col_splits):
+            col_chunk_size = kc.shape[-2]
+            k_start_index = k_ind * col_tile_size
+
+            attn_weights = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', qc, kc) * scale
+
+            if exists(bias):
+                print(attn_weights.shape, bias.shape)
+                attn_weights += bias
+
+            if exists(maskc):
+                attn_weights.masked_fill_(~maskc, max_neg_value)
+
+            if causal and q_start_index < (k_start_index + col_tile_size - 1):
+                causal_mask = torch.ones((row_chunk_size, col_chunk_size), dtype = torch.bool).triu(q_start_index - k_start_index + 1)
+                attn_weights.masked_fill_(causal_mask, max_neg_value)
+
+            exp_weights = torch.exp(attn_weights - scale)
+
+            if exists(maskc):
+                exp_weights.masked_fill_(~maskc, 0.)
+
+            exp_values = einsum(f'b h i j, {kv_einsum_eq} -> b h i d', exp_weights, vc)
+
+            oc.add_(exp_values)
+            lc.add_(exp_weights.sum(dim = -1, keepdim = True))
+    
+    o.div_(l.clamp(min = 1e-12))
+    return o.reshape(shape).type(dtype)
 
 # main class
 
@@ -180,9 +302,11 @@ def flash_cosine_sim_attention(
     attn_bias_batch_dim = False
 ):
     if l2norm_qk:
-        q, k = l2norm_tensors(q, k)    
+        q, k = l2norm_tensors(q, k)
 
-    o = flash_cosine_sim_attention_cuda(
+    fn = flash_cosine_sim_attention_cuda if q.data.is_cuda else flash_cosine_sim_attention_cpu
+
+    o = fn(
         q, k, v,
         mask,
         attn_bias,
