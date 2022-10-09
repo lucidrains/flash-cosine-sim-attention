@@ -1,3 +1,4 @@
+import os
 import math
 import importlib
 from functools import partial, wraps
@@ -7,7 +8,7 @@ from torch import einsum
 import torch.nn.functional as F
 from torch.autograd import Function
 
-exec(open('flash_cosine_sim_attention/version.py').read())
+exec(open(os.path.dirname(os.path.abspath(__file__)) + '/version.py').read())
 
 # try to import cuda
 
@@ -202,7 +203,6 @@ def flash_cosine_sim_attention_cpu(
             attn_weights = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', qc, kc) * scale
 
             if exists(bias):
-                print(attn_weights.shape, bias.shape)
                 attn_weights += bias
 
             if exists(maskc):
