@@ -238,7 +238,8 @@ namespace layout {
             mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +    // q
             mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +    // k
             mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size + // c
-            mem::shared_fragment<scalar_t, 1, row_tile_size>::size               // d
+            mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
+            mem::shared_fragment<bool, 1, col_tile_size>::size
         );
     };
 
@@ -255,7 +256,8 @@ namespace layout {
             mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // q
             mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // k
             mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size +    // c
-            mem::shared_fragment<scalar_t, 1, row_tile_size>::size              // d
+            mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
+            mem::shared_fragment<bool, 1, col_tile_size>::size
         );
     };
 
@@ -272,7 +274,8 @@ namespace layout {
             mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // q
             mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // k
             mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size +     // c
-            mem::shared_fragment<scalar_t, 1, row_tile_size>::size               // d
+            mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
+            mem::shared_fragment<bool, 1, col_tile_size>::size
         );
     };
 
@@ -1091,7 +1094,7 @@ __global__ void backward_kernel(
     D_sm_t D_sm{next_ptr_};
 
     C_sm_t C_sm{D_sm.next()};
-    mask_sm_t mask_sm{D_sm.next()};
+    mask_sm_t mask_sm{C_sm.next()};
 
     // shortcut accessors
 
@@ -1122,6 +1125,9 @@ __global__ void backward_kernel(
     dv_mma.zero();
     dk_mma.zero();
 
+    if (has_mask)
+        mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len);
+
     for (int row_tile_offset = 0; row_tile_offset < row_seq_len; row_tile_offset += row_tile_size) {
 
         if (causal && ((col_tile_offset - seq_len_diff) >= (row_tile_offset + row_tile_size)))
@@ -1143,9 +1149,6 @@ __global__ void backward_kernel(
         // load rowsums and mask if needed
 
         L_sm.store_row(l_, row_tile_offset, row_tile_size, row_seq_len);
-
-        if (has_mask)
-            mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len);
 
         __syncthreads();
 
@@ -1173,9 +1176,6 @@ __global__ void backward_kernel(
 
             return __expf(scale * el + bias - shift) * L_sm.smem[row];
         });
-
-        if (has_mask)
-            __syncthreads();
 
         QK_mma.store(C_sm);
 
@@ -1352,44 +1352,52 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
     auto l = at::empty({batch, heads, should_backwards ? q_seq_len : 0}, options.dtype(at::kFloat));
 
+    // store whether it is ampere or later gen, for differing logic for smem
+
+    #if defined(__CUDA_ARCH__) &&__CUDA_ARCH__ >= 800
+        constexpr bool IS_AMPERE_OR_LATER = true;
+    #else
+        constexpr bool IS_AMPERE_OR_LATER = false;
+    #endif
+
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
-        VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
+    VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
-            using layout_attn_tiles = layout::attn<scalar_t, dim_head, true>;
+        using layout_attn_tiles = layout::attn<scalar_t, dim_head, true>;
 
-            const int row_tile_size = layout_attn_tiles::row_tile_size;
-            const int col_tile_size = layout_attn_tiles::col_tile_size;
+        const int row_tile_size = layout_attn_tiles::row_tile_size;
+        const int col_tile_size = layout_attn_tiles::col_tile_size;
 
-            const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
+        const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
 
-            const dim3 threads_per_block(tpb);
+        const dim3 threads_per_block(tpb);
 
-            const dim3 blocks(
-                cdiv(q_seq_len, row_tile_size),
-                batch,
-                heads
-            );
+        const dim3 blocks(
+            cdiv(q_seq_len, row_tile_size),
+            batch,
+            heads
+        );
 
-            forward_kernel<scalar_t, row_tile_size, col_tile_size, dim_head, tpb><<<blocks, threads_per_block>>>(
-                ACCESSOR(q, 4, scalar_t),
-                ACCESSOR(k, 4, scalar_t),
-                ACCESSOR(v, 4, scalar_t),
-                ACCESSOR(o, 4, scalar_t),
-                ACCESSOR(l, 3, float),
-                ACCESSOR(mask_value, 2, bool),
-                ACCESSOR(attn_bias_value, 3, scalar_t),
-                scale,
-                causal,
-                has_mask,
-                has_attn_bias,
-                attn_bias_batch_dim,
-                should_backwards,
-                is_single_head_kv
-            );
+        forward_kernel<scalar_t, row_tile_size, col_tile_size, dim_head, tpb><<<blocks, threads_per_block>>>(
+            ACCESSOR(q, 4, scalar_t),
+            ACCESSOR(k, 4, scalar_t),
+            ACCESSOR(v, 4, scalar_t),
+            ACCESSOR(o, 4, scalar_t),
+            ACCESSOR(l, 3, float),
+            ACCESSOR(mask_value, 2, bool),
+            ACCESSOR(attn_bias_value, 3, scalar_t),
+            scale,
+            causal,
+            has_mask,
+            has_attn_bias,
+            attn_bias_batch_dim,
+            should_backwards,
+            is_single_head_kv
+        );
 
-        ), ())
+    ), ())
     ), ())
 
     if (is_merged_batch_head)
@@ -1483,60 +1491,68 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
     auto dk_scalar_type = dk.scalar_type();
 
+    // store whether it is ampere or later gen, for differing logic for smem
+
+    #if defined(__CUDA_ARCH__) &&__CUDA_ARCH__ >= 800
+        constexpr bool IS_AMPERE_OR_LATER = true;
+    #else
+        constexpr bool IS_AMPERE_OR_LATER = false;
+    #endif
+
     // setup backwards call
 
     AT_TYPE_DISPATCH_SWITCH(dk_scalar_type, kv_scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-        AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-            VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
+    AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
+    VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
-                using layout_attn_tiles = layout::attn<scalar_t, dim_head, false>;
+        using layout_attn_tiles = layout::attn<scalar_t, dim_head, false>;
 
-                const int row_tile_size = layout_attn_tiles::row_tile_size;
-                const int col_tile_size = layout_attn_tiles::col_tile_size;
+        const int row_tile_size = layout_attn_tiles::row_tile_size;
+        const int col_tile_size = layout_attn_tiles::col_tile_size;
 
-                const dim3 preprocess_threads_per_block(dim_head);
+        const dim3 preprocess_threads_per_block(dim_head);
 
-                const dim3 preprocess_blocks(batch * heads, seq);
+        const dim3 preprocess_blocks(batch * heads, seq);
 
-                backward_preprocess<scalar_t, dim_head><<<preprocess_blocks, preprocess_threads_per_block>>>(
-                    ACCESSOR(d_out, 4, scalar_t),
-                    ACCESSOR(o, 4, scalar_t),
-                    ACCESSOR(delta, 3, scalar_t)
-                );
+        backward_preprocess<scalar_t, dim_head><<<preprocess_blocks, preprocess_threads_per_block>>>(
+            ACCESSOR(d_out, 4, scalar_t),
+            ACCESSOR(o, 4, scalar_t),
+            ACCESSOR(delta, 3, scalar_t)
+        );
 
-                const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
+        const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
 
-                const dim3 backwards_threads_per_block(tpb);
+        const dim3 backwards_threads_per_block(tpb);
 
-                const dim3 backwards_blocks(
-                    batch * heads,
-                    cdiv(k_seq, col_tile_size)
-                );
+        const dim3 backwards_blocks(
+            batch * heads,
+            cdiv(k_seq, col_tile_size)
+        );
 
-                backward_kernel<scalar_t, kv_scalar_t, row_tile_size, col_tile_size, dim_head, tpb><<<backwards_blocks, backwards_threads_per_block>>>(
-                    ACCESSOR(q, 4, scalar_t),
-                    ACCESSOR(k, 4, scalar_t),
-                    ACCESSOR(v, 4, scalar_t),
-                    ACCESSOR(l, 3, float),
-                    ACCESSOR(mask_value, 2, bool),
-                    ACCESSOR(attn_bias_value, 3, scalar_t),
-                    ACCESSOR(dq, 4, float),
-                    ACCESSOR(dk, 4, kv_scalar_t),
-                    ACCESSOR(dv, 4, kv_scalar_t),
-                    ACCESSOR(db, 3, float),
-                    ACCESSOR(d_out, 4, scalar_t),
-                    ACCESSOR(delta, 3, scalar_t),
-                    scale,
-                    causal,
-                    has_mask,
-                    has_attn_bias,
-                    attn_bias_batch_dim,
-                    attn_bias_requires_grad,
-                    is_single_head_kv
-                );
+        backward_kernel<scalar_t, kv_scalar_t, row_tile_size, col_tile_size, dim_head, tpb><<<backwards_blocks, backwards_threads_per_block>>>(
+            ACCESSOR(q, 4, scalar_t),
+            ACCESSOR(k, 4, scalar_t),
+            ACCESSOR(v, 4, scalar_t),
+            ACCESSOR(l, 3, float),
+            ACCESSOR(mask_value, 2, bool),
+            ACCESSOR(attn_bias_value, 3, scalar_t),
+            ACCESSOR(dq, 4, float),
+            ACCESSOR(dk, 4, kv_scalar_t),
+            ACCESSOR(dv, 4, kv_scalar_t),
+            ACCESSOR(db, 3, float),
+            ACCESSOR(d_out, 4, scalar_t),
+            ACCESSOR(delta, 3, scalar_t),
+            scale,
+            causal,
+            has_mask,
+            has_attn_bias,
+            attn_bias_batch_dim,
+            attn_bias_requires_grad,
+            is_single_head_kv
+        );
 
-            ), ())
-        ), ())
+    ), ())
+    ), ())
     ), ())
 
     // handle error
