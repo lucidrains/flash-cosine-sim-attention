@@ -231,7 +231,7 @@ namespace layout {
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
             mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size  // c
+            mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>::size  // c
         );
 
         static constexpr int backward_size = (
@@ -291,6 +291,12 @@ namespace layout {
     struct attn<at::Half, dim_head, is_forward> {
         static constexpr int row_tile_size = 64;
         static constexpr int col_tile_size = 64;
+    };
+
+    template<>
+    struct attn<at::Half, 64, true> {
+        static constexpr int row_tile_size = 64;
+        static constexpr int col_tile_size = 96;
     };
 
     // warp layout
@@ -366,6 +372,27 @@ namespace layout {
 
         static_assert(N_thread * N_warp * N_block == 64);
         static_assert(M_thread * M_warp * M_block == 96);
+    };
+
+    template<>
+    struct warp<at::Half, 256, 96, 64> {
+        static constexpr int M_thread = 1;
+        static constexpr int N_thread = 3;
+
+        static constexpr int M_warp = 16;
+        static constexpr int N_warp = 16;
+
+        static constexpr int M_block = 4;
+        static constexpr int N_block = 2;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == 256);
+
+        static_assert(N_thread * N_warp * N_block == 96);
+        static_assert(M_thread * M_warp * M_block == 64);
     };
 
     template<>
@@ -795,7 +822,7 @@ __global__ void forward_kernel(
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
-    using C_sm_t = mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>;
+    using C_sm_t = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 2, col_tile_size>;
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1>;
     using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
