@@ -230,13 +230,13 @@ namespace layout {
 
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
             mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size  // c
         );
 
         static constexpr int backward_size = (
             mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +    // q
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +    // k
+            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +    // k
             mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size + // c
             mem::shared_fragment<scalar_t, 1, row_tile_size>::size               // d
         );
@@ -247,7 +247,7 @@ namespace layout {
 
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
             mem::shared_fragment<scalar_t, row_tile_size, 96>::size             // c
         );
 
@@ -264,7 +264,7 @@ namespace layout {
 
         static constexpr int forward_size = (
             mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // k
+            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
             mem::shared_fragment<scalar_t, row_tile_size, 128>::size            // c
         );
 
