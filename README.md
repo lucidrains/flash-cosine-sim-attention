@@ -10,7 +10,7 @@ In other words, stable, fast, memory efficient, and longer context attention wit
 
 ## Status (wip)
 
-- At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not. However, for non-autoregressive without masking, the architecture is still slower on A100s. The backwards pass needs more work.
+- At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not. However, for non-autoregressive without masking, the architecture is still slower. The aim is to get it to perform at least faster on A100 forwards and backwards. Older graphic cards without enough shared memory, one will have to gauge the tradeoff of memory efficiency and speed.
 
 ## Appreciation
 

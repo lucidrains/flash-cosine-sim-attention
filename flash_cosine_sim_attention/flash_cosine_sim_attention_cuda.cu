@@ -877,8 +877,7 @@ __global__ void forward_kernel(
 
         if (has_mask)
             mask_sm.store_row(mask_, col_tile_offset, col_tile_size, col_seq_len);
-
-        __syncthreads();
+            __syncthreads();
 
         // scale and exponentiation, depending on masking or not
 
@@ -1064,7 +1063,7 @@ __global__ void backward_kernel(
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size>;
+    using QK_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size>;
     using dV_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head>;
     using dK_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head>;
     using dQ_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head>;
@@ -1089,7 +1088,8 @@ __global__ void backward_kernel(
     using DO_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
     using DO_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
 
-    using C_sm_t = mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>;
+    using C_sm_ = mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>;
+    using C_sm_t_ = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size>;
 
     using DK_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
@@ -1120,8 +1120,11 @@ __global__ void backward_kernel(
 
     D_sm_t D_sm{next_ptr_};
 
-    C_sm_t C_sm{D_sm.next()};
-    mask_sm_t mask_sm{C_sm.next()};
+    C_sm_ C_sm{D_sm.next()};
+    C_sm_t_ C_sm_t{D_sm.next()};
+
+    auto next_ptr__ = C_sm_::size > C_sm_t_::size ? C_sm.next() : C_sm_t.next();
+    mask_sm_t mask_sm{next_ptr__};
 
     // shortcut accessors
 
@@ -1243,7 +1246,7 @@ __global__ void backward_kernel(
         // calculate ds = (dp - delta) * p
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
-            return (el - D_sm.smem[row]) * C_sm(col, row);
+            return (el - D_sm.smem[row]) * C_sm_t(col, row);
         });
 
         __syncthreads();
@@ -1276,7 +1279,7 @@ __global__ void backward_kernel(
             __syncthreads();
         }
 
-        QK_mma.store_transpose(C_sm);
+        QK_mma.store_transpose(C_sm_t);
 
         __syncthreads();
 
@@ -1286,7 +1289,7 @@ __global__ void backward_kernel(
             K_sm.load(k_, 0, col_tile_offset + k, 0, col_seq_len);
             __syncthreads();
 
-            dq_mma.mma(C_sm, K_sm, k, 0, chunk_size);
+            dq_mma.mma(C_sm_t, K_sm, k, 0, chunk_size);
             __syncthreads();
         }
 
