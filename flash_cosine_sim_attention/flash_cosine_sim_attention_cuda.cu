@@ -210,6 +210,7 @@ namespace layout {
 
     static constexpr int chunk_size = 16;
 
+
     // threads per block
 
     template<typename scalar_t, int dim_head>
@@ -274,6 +275,22 @@ namespace layout {
             mem::shared_fragment<scalar_t, 1, row_tile_size>::size               // d
         );
     };
+
+    // attention tile sizes
+
+    template<typename scalar_t, int dim_head, bool is_forward>
+    struct attn {
+        static constexpr int row_tile_size = 64;
+        static constexpr int col_tile_size = 64;
+    };
+
+    template<int dim_head, bool is_forward>
+    struct attn<at::Half, dim_head, is_forward> {
+        static constexpr int row_tile_size = 64;
+        static constexpr int col_tile_size = 64;
+    };
+
+    // warp layout
 
     // f32
 
@@ -1340,8 +1357,10 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
         VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
-            const int row_tile_size = 64;
-            const int col_tile_size = 64;
+            using layout_attn_tiles = layout::attn<scalar_t, dim_head, true>;
+
+            const int row_tile_size = layout_attn_tiles::row_tile_size;
+            const int col_tile_size = layout_attn_tiles::col_tile_size;
 
             const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
 
@@ -1470,8 +1489,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
         AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
             VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
 
-                const int row_tile_size = 64;
-                const int col_tile_size = 64;
+                using layout_attn_tiles = layout::attn<scalar_t, dim_head, false>;
+
+                const int row_tile_size = layout_attn_tiles::row_tile_size;
+                const int col_tile_size = layout_attn_tiles::col_tile_size;
 
                 const dim3 preprocess_threads_per_block(dim_head);
 
