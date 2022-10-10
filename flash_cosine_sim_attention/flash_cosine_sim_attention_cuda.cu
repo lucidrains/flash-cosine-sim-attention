@@ -42,11 +42,11 @@ __host__ __device__ int cdiv(int numer, int denom) {
 // shared memory struct
 
 namespace mem {
-    template<typename T, int N_tile, int M_tile>
+    template<typename T, int N_tile, int M_tile, bool add_padding = true>
     struct shared_fragment {
         static constexpr int N = N_tile;
         static constexpr int M = M_tile;
-        static constexpr int stride = M + (sizeof(T) == 2 ? 8 : 1);
+        static constexpr int stride = M + (add_padding ? (sizeof(T) == 2 ? 8 : 1) : 0);
         static constexpr int size = N * stride;
 
         T* smem;
@@ -239,7 +239,7 @@ namespace layout {
             mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +    // k
             mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size + // c
             mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
-            mem::shared_fragment<bool, 1, col_tile_size>::size
+            mem::shared_fragment<bool, 1, col_tile_size, false>::size
         );
     };
 
@@ -1078,8 +1078,8 @@ __global__ void backward_kernel(
     using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
     using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
-    using L_sm_t = mem::shared_fragment<float, 1, row_tile_size>;
-    using D_sm_t = mem::shared_fragment<scalar_t, 1, row_tile_size>;
+    using L_sm_t = mem::shared_fragment<float, 1, row_tile_size, false>;
+    using D_sm_t = mem::shared_fragment<scalar_t, 1, row_tile_size, false>;
 
     using K_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using K_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
@@ -1090,7 +1090,7 @@ __global__ void backward_kernel(
 
     using C_sm_ = mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>;
     using C_sm_t_ = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
-    using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size>;
+    using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size, false>;
 
     using DK_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
     using DV_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
