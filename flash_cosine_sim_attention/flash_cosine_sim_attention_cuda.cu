@@ -218,7 +218,7 @@ namespace layout {
     };
 
     template<int dim_head>
-    struct tpb<c10::Half, dim_head> {
+    struct tpb<at::Half, dim_head> {
         static constexpr int TPB = 256;
     };
 
@@ -277,7 +277,7 @@ namespace layout {
 
     // f32
 
-    template<typename scalar_t, int dim_head, int N_tile_, int M_tile_>
+    template<typename scalar_t, int tpb, int N_tile_, int M_tile_>
     struct warp {
         static constexpr int K_tile = 1;
 
@@ -293,7 +293,7 @@ namespace layout {
 
 
     template<typename scalar_t>
-    struct warp<scalar_t, 64, 64, 64> {
+    struct warp<scalar_t, 256, 64, 64> {
         static constexpr int N_warp = 8;
         static constexpr int M_warp = 4;
 
@@ -305,7 +305,7 @@ namespace layout {
 
         // constraints
         static_assert(N_warp * M_warp == 32);
-        static_assert(N_block * M_block * N_warp * M_warp == layout::tpb<scalar_t, 64>::TPB);
+        static_assert(N_block * M_block * N_warp * M_warp == 256);
 
         static_assert(N_warp * N_block * N_thread == 64);
         static_assert(M_warp * M_block * M_thread == 64);
@@ -313,8 +313,8 @@ namespace layout {
 
     // f16
 
-    template<int dim_head, int N_tile_, int M_tile_>
-    struct warp<c10::Half, dim_head, N_tile_, M_tile_> {
+    template<int tpb, int N_tile_, int M_tile_>
+    struct warp<at::Half, tpb, N_tile_, M_tile_> {
         static constexpr int K_tile = 16;
 
         static constexpr int N_block = 2;
@@ -328,28 +328,7 @@ namespace layout {
     };
 
     template<>
-    struct warp<c10::Half, 64, 64, 64> {
-        static constexpr int N_thread = 2;
-        static constexpr int M_thread = 1;
-
-        static constexpr int N_warp = 16;
-        static constexpr int M_warp = 16;
-
-        static constexpr int N_block = 2;
-        static constexpr int M_block = 4;
-
-        static constexpr int K_tile = 16;
-
-        // constraints
-        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
-        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 64>::TPB);
-
-        static_assert(N_thread * N_warp * N_block == 64);
-        static_assert(M_thread * M_warp * M_block == 64);
-    };
-
-    template<>
-    struct warp<c10::Half, 96, 64, 96> {
+    struct warp<at::Half, 256, 64, 96> {
         static constexpr int N_thread = 1;
         static constexpr int M_thread = 3;
 
@@ -363,14 +342,14 @@ namespace layout {
 
         // constraints
         static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
-        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 96>::TPB);
+        static_assert(N_block * M_block * 32 == 256);
 
         static_assert(N_thread * N_warp * N_block == 64);
         static_assert(M_thread * M_warp * M_block == 96);
     };
 
     template<>
-    struct warp<c10::Half, 32, 64, 32> {
+    struct warp<at::Half, 256, 64, 32> {
         static constexpr int N_thread = 1;
         static constexpr int M_thread = 1;
 
@@ -384,28 +363,28 @@ namespace layout {
 
         // constraints
         static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
-        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 32>::TPB);
+        static_assert(N_block * M_block * 32 == 256);
 
         static_assert(N_thread * N_warp * N_block == 64);
         static_assert(M_thread * M_warp * M_block == 32);
     };
 
     template<>
-    struct warp<c10::Half, 32, 64, 64> {
-        static constexpr int N_thread = 1;
-        static constexpr int M_thread = 2;
+    struct warp<at::Half, 256, 64, 64> {
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 1;
 
         static constexpr int N_warp = 16;
         static constexpr int M_warp = 16;
 
-        static constexpr int N_block = 4;
-        static constexpr int M_block = 2;
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
 
         static constexpr int K_tile = 16;
 
         // constraints
         static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
-        static_assert(N_block * M_block * 32 == layout::tpb<c10::Half, 32>::TPB);
+        static_assert(N_block * M_block * 32 == 256);
 
         static_assert(N_thread * N_warp * N_block == 64);
         static_assert(M_thread * M_warp * M_block == 64);
@@ -417,10 +396,10 @@ namespace layout {
 #include <mma.h>
 
 namespace mma {
-    template<typename scalar_t, int dim_head, int N_tile_, int M_tile_>
+    template<typename scalar_t, int tpb, int N_tile_, int M_tile_>
     struct warp_tile {
 
-        using l = layout::warp<scalar_t, dim_head, N_tile_, M_tile_>;
+        using l = layout::warp<scalar_t, tpb, N_tile_, M_tile_>;
 
         // How much data is processed by a single thread:
         static constexpr int N_thread = l::N_thread;
@@ -565,9 +544,9 @@ namespace mma {
 
     using namespace nvcuda;
     template<int dim_head, int N_tile_, int M_tile_>
-    struct warp_tile<c10::Half, dim_head, N_tile_, M_tile_> {
+    struct warp_tile<at::Half, dim_head, N_tile_, M_tile_> {
 
-        using l = layout::warp<c10::Half, dim_head, N_tile_, M_tile_>;
+        using l = layout::warp<at::Half, dim_head, N_tile_, M_tile_>;
 
         // How much data is processed by a single thread:
         static constexpr int N_thread = l::N_thread;
@@ -608,7 +587,7 @@ namespace mma {
                 for (int j = 0; j < M_thread; j++) {
                     #pragma unroll
                     for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
-                        C_frag[i * M_thread + j].x[k] = (c10::Half) 0.f;
+                        C_frag[i * M_thread + j].x[k] = (at::Half) 0.f;
                     }
                 }
             }
@@ -749,7 +728,7 @@ namespace mma {
 
 // forward kernel
 
-template <typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
+template <typename scalar_t, int row_tile_size, int col_tile_size, int dim_head, int tpb>
 __global__ void forward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -781,8 +760,8 @@ __global__ void forward_kernel(
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, row_tile_size, col_tile_size>;
-    using out_mma_t = mma::warp_tile<scalar_t, dim_head, row_tile_size, dim_head>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size>;
+    using out_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head>;
 
     float bias;
 
@@ -999,7 +978,7 @@ __global__ void backward_preprocess(
 
 // backward kernel
 
-template <typename scalar_t, typename kv_scalar_t, int row_tile_size, int col_tile_size, int dim_head>
+template <typename scalar_t, typename kv_scalar_t, int row_tile_size, int col_tile_size, int dim_head, int tpb>
 __global__ void backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
@@ -1038,10 +1017,10 @@ __global__ void backward_kernel(
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t, dim_head, row_tile_size, col_tile_size>;
-    using dV_mma_t = mma::warp_tile<scalar_t, dim_head, col_tile_size, dim_head>;
-    using dK_mma_t = mma::warp_tile<scalar_t, dim_head, col_tile_size, dim_head>;
-    using dQ_mma_t = mma::warp_tile<scalar_t, dim_head, row_tile_size, dim_head>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size>;
+    using dV_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head>;
+    using dK_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head>;
+    using dQ_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head>;
 
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
@@ -1364,7 +1343,9 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
             const int row_tile_size = 64;
             const int col_tile_size = 64;
 
-            const dim3 threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
+            const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
+
+            const dim3 threads_per_block(tpb);
 
             const dim3 blocks(
                 cdiv(q_seq_len, row_tile_size),
@@ -1372,7 +1353,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
                 heads
             );
 
-            forward_kernel<scalar_t, row_tile_size, col_tile_size, dim_head><<<blocks, threads_per_block>>>(
+            forward_kernel<scalar_t, row_tile_size, col_tile_size, dim_head, tpb><<<blocks, threads_per_block>>>(
                 ACCESSOR(q, 4, scalar_t),
                 ACCESSOR(k, 4, scalar_t),
                 ACCESSOR(v, 4, scalar_t),
@@ -1502,14 +1483,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
                     ACCESSOR(delta, 3, scalar_t)
                 );
 
-                const dim3 backwards_threads_per_block(layout::tpb<scalar_t, dim_head>::TPB);
+                const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
+
+                const dim3 backwards_threads_per_block(tpb);
 
                 const dim3 backwards_blocks(
                     batch * heads,
                     cdiv(k_seq, col_tile_size)
                 );
 
-                backward_kernel<scalar_t, kv_scalar_t, row_tile_size, col_tile_size, dim_head><<<backwards_blocks, backwards_threads_per_block>>>(
+                backward_kernel<scalar_t, kv_scalar_t, row_tile_size, col_tile_size, dim_head, tpb><<<backwards_blocks, backwards_threads_per_block>>>(
                     ACCESSOR(q, 4, scalar_t),
                     ACCESSOR(k, 4, scalar_t),
                     ACCESSOR(v, 4, scalar_t),
