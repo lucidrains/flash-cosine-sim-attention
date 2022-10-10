@@ -8,6 +8,10 @@ Implementation of fused cosine similarity attention in the same style as <a href
 
 In other words, stable, fast, memory efficient, and longer context attention with no downsides.
 
+## Status (wip)
+
+- At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not. However, for non-autoregressive without masking, the architecture is still slower on A100s. The backwards pass needs more work.
+
 ## Appreciation
 
 - <a href="https://github.com/ahennequ">Arthur Hennequin</a> for coaching me through my first CUDA kernel, and for coding up a simple <a href="https://github.com/ahennequ/pytorch-custom-mma">reference implementation</a>, which helped me to bootstrap the first kernel that comes within reasonable performance to baseline. This work would not have been possible without his expertise.
