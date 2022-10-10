@@ -28,6 +28,9 @@ void check(const char* file, const int line, const bool cuda_sync)
 
 #define ACCESSOR(x, n, type) x.packed_accessor32<type, n, torch::RestrictPtrTraits>()
 
+#define SMEM_SIZE(T, N_tile, M_tile) mem::shared_fragment<T, N_tile, M_tile>::size
+#define SMEM_SIZE_NO_PAD(T, N_tile, M_tile) mem::shared_fragment<T, N_tile, M_tile, false>::size
+
 // type alias
 
 template <typename scalar_t, int dims>
@@ -229,17 +232,17 @@ namespace layout {
     struct smem {
 
         static constexpr int forward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>::size  // c
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
+            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)  // c
         );
 
         static constexpr int backward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +    // q
-            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +    // k
-            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size + // c
-            mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
-            mem::shared_fragment<bool, 1, col_tile_size, false>::size
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +    // q
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +    // k
+            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) + // c
+            SMEM_SIZE(scalar_t, 1, row_tile_size) +
+            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
         );
     };
 
@@ -247,17 +250,17 @@ namespace layout {
     struct smem<scalar_t, row_tile_size, col_tile_size, 96> {
 
         static constexpr int forward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, row_tile_size, 96>::size             // c
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
+            SMEM_SIZE(scalar_t, row_tile_size, 96)             // c
         );
 
         static constexpr int backward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // q
-            mem::shared_fragment<scalar_t, chunk_size, 96>::size +          // k
-            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size +    // c
-            mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
-            mem::shared_fragment<bool, 1, col_tile_size>::size
+            SMEM_SIZE(scalar_t, chunk_size, 96) +                  // q
+            SMEM_SIZE(scalar_t, chunk_size, 96) +                  // k
+            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) +    // c
+            SMEM_SIZE(scalar_t, 1, row_tile_size) +
+            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
         );
     };
 
@@ -265,17 +268,17 @@ namespace layout {
     struct smem<scalar_t, row_tile_size, col_tile_size, 128> {
 
         static constexpr int forward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, row_tile_size>::size +   // q
-            mem::shared_fragment<scalar_t, chunk_size, col_tile_size>::size +   // k
-            mem::shared_fragment<scalar_t, row_tile_size, 128>::size            // c
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
+            SMEM_SIZE(scalar_t, row_tile_size, 128)            // c
         );
 
         static constexpr int backward_size = (
-            mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // q
-            mem::shared_fragment<scalar_t, chunk_size, 128>::size +          // k
-            mem::shared_fragment<scalar_t, row_tile_size, col_tile_size>::size +     // c
-            mem::shared_fragment<scalar_t, 1, row_tile_size>::size +
-            mem::shared_fragment<bool, 1, col_tile_size>::size
+            SMEM_SIZE(scalar_t, chunk_size, 128) +                  // q
+            SMEM_SIZE(scalar_t, chunk_size, 128) +                  // k
+            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) +     // c
+            SMEM_SIZE(scalar_t, 1, row_tile_size) +
+            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
         );
     };
 
