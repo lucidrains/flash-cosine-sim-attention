@@ -10,7 +10,11 @@ In other words, stable, fast, memory efficient, and longer context attention wit
 
 ## Status (wip)
 
-- At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not. However, for non-autoregressive without masking, the architecture is still slower. The aim is to get it to perform at least faster on A100 forwards and backwards. Older graphic cards without enough shared memory, one will have to gauge the tradeoff of memory efficiency and speed.
+At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not.
+
+However, for non-autoregressive without masking, the architecture is still slower on A100 for F16. The aim is to get it to perform faster on A100 forwards and backwards for both F32 and F16, as shared memory is not fully exploited yet.
+
+Older graphic cards without enough shared memory, one will have to gauge the tradeoff of memory efficiency and speed depending on the sequence length being trained at.
 
 ## Appreciation
 
@@ -291,6 +295,139 @@ seq_len: 1024   slower: 0.70x   kernel: 2.98ms  baseline: 4.27ms
 seq_len: 2048   slower: 0.66x   kernel: 10.15ms baseline: 15.35ms
 seq_len: 4096   slower: 0.65x   kernel: 37.49ms baseline: 58.10ms
 seq_len: 8192   slower: 0.00x   kernel: 144.23ms    baseline: oom
+```
+
+### A100 40GB (wip)
+
+Thanks goes out to <a href="https://stability.ai/">Stability</a> for providing access to A100s for testing. Thanks to <a href="https://github.com/conceptofmind">Enrico</a> for taking the time to run some benchmarks when I had no access yet.
+
+A100 is still a work in progress. Shared memory is not fully exploited yet. Strangely enough, F32 seems to be doing better than F16
+
+####
+
+Forwards
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 1.05x   kernel: 0.31ms  baseline: 0.29ms
+seq_len: 256    slower: 1.18x   kernel: 0.35ms  baseline: 0.30ms
+seq_len: 512    slower: 0.96x   kernel: 0.54ms  baseline: 0.56ms
+seq_len: 1024   slower: 0.87x   kernel: 1.24ms  baseline: 1.43ms
+seq_len: 2048   slower: 0.87x   kernel: 4.17ms  baseline: 4.82ms
+seq_len: 4096   slower: 0.79x   kernel: 14.53ms baseline: 18.37ms
+seq_len: 8192   slower: 0.64x   kernel: 55.05ms baseline: 85.83ms
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.85x   kernel: 0.25ms  baseline: 0.30ms
+seq_len: 256    slower: 1.03x   kernel: 0.31ms  baseline: 0.30ms
+seq_len: 512    slower: 1.21x   kernel: 0.37ms  baseline: 0.30ms
+seq_len: 1024   slower: 1.46x   kernel: 0.79ms  baseline: 0.54ms
+seq_len: 2048   slower: 1.29x   kernel: 2.05ms  baseline: 1.59ms
+seq_len: 4096   slower: 1.19x   kernel: 6.78ms  baseline: 5.71ms
+seq_len: 8192   slower: 1.05x   kernel: 24.42ms baseline: 23.15ms
+```
+
+Backwards
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.95x   kernel: 0.58ms  baseline: 0.61ms
+seq_len: 256    slower: 1.28x   kernel: 0.76ms  baseline: 0.59ms
+seq_len: 512    slower: 1.17x   kernel: 1.30ms  baseline: 1.11ms
+seq_len: 1024   slower: 0.98x   kernel: 3.13ms  baseline: 3.18ms
+seq_len: 2048   slower: 1.05x   kernel: 11.18ms baseline: 10.62ms
+seq_len: 4096   slower: 0.99x   kernel: 40.19ms baseline: 40.76ms
+seq_len: 8192   slower: 0.98x   kernel: 155.64ms    baseline: 159.08ms
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.91x   kernel: 0.56ms  baseline: 0.61ms
+seq_len: 256    slower: 1.02x   kernel: 0.63ms  baseline: 0.61ms
+seq_len: 512    slower: 1.35x   kernel: 0.82ms  baseline: 0.61ms
+seq_len: 1024   slower: 1.52x   kernel: 1.53ms  baseline: 1.01ms
+seq_len: 2048   slower: 1.35x   kernel: 4.10ms  baseline: 3.03ms
+seq_len: 4096   slower: 1.31x   kernel: 14.08ms baseline: 10.71ms
+seq_len: 8192   slower: 1.32x   kernel: 53.33ms baseline: 40.26ms
+````
+
+Forwards & Backwards
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.92x   kernel: 0.83ms  baseline: 0.90ms
+seq_len: 256    slower: 1.21x   kernel: 1.09ms  baseline: 0.90ms
+seq_len: 512    slower: 1.09x   kernel: 1.82ms  baseline: 1.67ms
+seq_len: 1024   slower: 0.95x   kernel: 4.38ms  baseline: 4.62ms
+seq_len: 2048   slower: 0.99x   kernel: 15.32ms baseline: 15.41ms
+seq_len: 4096   slower: 0.92x   kernel: 54.76ms baseline: 59.32ms
+seq_len: 8192   slower: 0.91x   kernel: 210.76ms    baseline: 230.53ms
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.89x   kernel: 0.80ms  baseline: 0.90ms
+seq_len: 256    slower: 1.00x   kernel: 0.90ms  baseline: 0.90ms
+seq_len: 512    slower: 1.33x   kernel: 1.20ms  baseline: 0.90ms
+seq_len: 1024   slower: 1.49x   kernel: 2.32ms  baseline: 1.56ms
+seq_len: 2048   slower: 1.32x   kernel: 6.14ms  baseline: 4.64ms
+seq_len: 4096   slower: 1.27x   kernel: 20.85ms baseline: 16.48ms
+seq_len: 8192   slower: 1.23x   kernel: 77.80ms baseline: 63.42ms
+```
+
+Autoregressive
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.82x   kernel: 0.82ms  baseline: 1.01ms
+seq_len: 256    slower: 1.02x   kernel: 1.00ms  baseline: 0.98ms
+seq_len: 512    slower: 0.82x   kernel: 1.55ms  baseline: 1.89ms
+seq_len: 1024   slower: 0.51x   kernel: 2.79ms  baseline: 5.44ms
+seq_len: 2048   slower: 0.45x   kernel: 8.37ms  baseline: 18.67ms
+seq_len: 4096   slower: 0.40x   kernel: 29.16ms baseline: 72.97ms
+seq_len: 8192   slower: 0.38x   kernel: 108.68ms    baseline: 285.47ms
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.82x   kernel: 0.81ms  baseline: 0.98ms
+seq_len: 256    slower: 0.90x   kernel: 0.88ms  baseline: 0.98ms
+seq_len: 512    slower: 1.16x   kernel: 1.13ms  baseline: 0.97ms
+seq_len: 1024   slower: 0.80x   kernel: 1.68ms  baseline: 2.10ms
+seq_len: 2048   slower: 0.54x   kernel: 3.66ms  baseline: 6.81ms
+seq_len: 4096   slower: 0.45x   kernel: 11.43ms baseline: 25.32ms
+seq_len: 8192   slower: 0.41x   kernel: 40.58ms baseline: 99.14ms
+```
+
+Variable lengthed sequences (up to 25% tokens masked out)
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.80x   kernel: 0.85ms  baseline: 1.07ms
+seq_len: 256    slower: 1.07x   kernel: 1.15ms  baseline: 1.08ms
+seq_len: 512    slower: 1.00x   kernel: 1.94ms  baseline: 1.94ms
+seq_len: 1024   slower: 0.84x   kernel: 4.64ms  baseline: 5.55ms
+seq_len: 2048   slower: 0.84x   kernel: 15.86ms baseline: 18.86ms
+seq_len: 4096   slower: 0.76x   kernel: 55.19ms baseline: 72.47ms
+seq_len: 8192   slower: 0.75x   kernel: 212.48ms    baseline: 282.71ms
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64  
+------------------------------------------------------------
+seq_len: 128    slower: 0.80x   kernel: 0.83ms  baseline: 1.04ms
+seq_len: 256    slower: 0.90x   kernel: 0.93ms  baseline: 1.03ms
+seq_len: 512    slower: 1.18x   kernel: 1.22ms  baseline: 1.04ms
+seq_len: 1024   slower: 1.10x   kernel: 2.40ms  baseline: 2.17ms
+seq_len: 2048   slower: 0.89x   kernel: 6.27ms  baseline: 7.06ms
+seq_len: 4096   slower: 0.82x   kernel: 21.19ms baseline: 25.95ms
+seq_len: 8192   slower: 0.78x   kernel: 79.45ms baseline: 101.83ms
 ```
 
 ## Training a small GPT on Enwik8

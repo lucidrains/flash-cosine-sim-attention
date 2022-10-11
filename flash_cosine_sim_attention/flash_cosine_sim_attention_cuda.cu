@@ -1387,7 +1387,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
 
     // store whether it is ampere or later gen, for differing logic for smem
 
-    #if defined(__CUDA_ARCH__) &&__CUDA_ARCH__ >= 800
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
         constexpr bool IS_AMPERE_OR_LATER = true;
     #else
         constexpr bool IS_AMPERE_OR_LATER = false;
