@@ -233,7 +233,8 @@ namespace layout {
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
             SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
-            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)  // c
+            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) + // c
+            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
 
         static constexpr int backward_size = (
@@ -251,7 +252,8 @@ namespace layout {
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
             SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
-            SMEM_SIZE(scalar_t, row_tile_size, 96)             // c
+            SMEM_SIZE(scalar_t, row_tile_size, 96) +             // c
+            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
 
         static constexpr int backward_size = (
@@ -269,7 +271,8 @@ namespace layout {
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
             SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
-            SMEM_SIZE(scalar_t, row_tile_size, 128)            // c
+            SMEM_SIZE(scalar_t, row_tile_size, 128) +            // c
+            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
 
         static constexpr int backward_size = (
@@ -825,8 +828,8 @@ __global__ void forward_kernel(
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
-    using mask_sm_t = mem::shared_fragment<bool, 2, col_tile_size>;
-    using L_sm_t = mem::shared_fragment<float, row_tile_size, 1>;
+    using mask_sm_t = mem::shared_fragment<bool, 2, col_tile_size, false>;
+    using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
     using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
 
     __shared__ scalar_t _shared_mem[layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>::forward_size];
@@ -835,11 +838,11 @@ __global__ void forward_kernel(
 
     Q_sm_t Q_sm{__shared_mem};
     V_sm_t V_sm{__shared_mem};
+    O_sm_t O_sm{__shared_mem};
     K_sm_t K_sm{Q_sm.next()};
     C_sm_t C_sm{K_sm.next()};
-    L_sm_t L_sm{K_sm.next()};
-    O_sm_t O_sm{K_sm.next()};
     mask_sm_t mask_sm{K_sm.next()};
+    L_sm_t L_sm{C_sm.next()};
 
     // shortcut accessors
 
