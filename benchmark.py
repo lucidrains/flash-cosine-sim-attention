@@ -100,7 +100,7 @@ for name, dtype in (('float32', torch.float32), ('float16', torch.float16)):
 
     for batch, heads, dim in permutations:
         print('-' * 60)
-        print(f'{name}\t\tbatch: {batch}\theads: {heads}\tdim {dim}\t')
+        print(f'{name}\t\tbatch: {batch}\theads: {heads}\tdim {dim}')
         print('-' * 60)
 
         for seq in TEST_SEQUENCE_LENGTHS:

@@ -213,7 +213,6 @@ namespace layout {
 
     static constexpr int chunk_size = 16;
 
-
     // threads per block
 
     template<typename scalar_t, int dim_head>

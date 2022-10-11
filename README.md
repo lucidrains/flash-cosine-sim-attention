@@ -221,7 +221,58 @@ For only benchmarking forwards or backwards, append either `--only-forwards` or 
 
 ### GTX 2080 Ti
 
-Slower than baseline, but this is to be expected on older graphics cards. F16 slightly faster
+Forward
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64
+------------------------------------------------------------
+seq_len: 128    slower: 1.06x   kernel: 0.24ms  baseline: 0.23ms
+seq_len: 256    slower: 1.24x   kernel: 0.37ms  baseline: 0.30ms
+seq_len: 512    slower: 1.28x   kernel: 0.87ms  baseline: 0.68ms
+seq_len: 1024   slower: 1.26x   kernel: 2.96ms  baseline: 2.35ms
+seq_len: 2048   slower: 0.99x   kernel: 8.01ms  baseline: 8.13ms
+seq_len: 4096   slower: 0.89x   kernel: 30.91ms baseline: 34.85ms
+seq_len: 8192   slower: 0.00x   kernel: 122.31ms    baseline: oom
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64
+------------------------------------------------------------
+seq_len: 128    slower: 0.81x   kernel: 0.20ms  baseline: 0.24ms
+seq_len: 256    slower: 0.99x   kernel: 0.24ms  baseline: 0.24ms
+seq_len: 512    slower: 1.18x   kernel: 0.42ms  baseline: 0.36ms
+seq_len: 1024   slower: 0.92x   kernel: 0.90ms  baseline: 0.98ms
+seq_len: 2048   slower: 0.86x   kernel: 3.01ms  baseline: 3.50ms
+seq_len: 4096   slower: 0.80x   kernel: 10.46ms baseline: 12.99ms
+seq_len: 8192   slower: 0.00x   kernel: 40.62ms baseline: oom
+
+```
+
+Backwards - still needs work
+
+```bash
+------------------------------------------------------------
+float32     batch: 4    heads: 8    dim 64
+------------------------------------------------------------
+seq_len: 128    slower: 1.07x   kernel: 0.61ms  baseline: 0.57ms
+seq_len: 256    slower: 1.40x   kernel: 0.91ms  baseline: 0.65ms
+seq_len: 512    slower: 1.70x   kernel: 2.34ms  baseline: 1.38ms
+seq_len: 1024   slower: 1.26x   kernel: 5.67ms  baseline: 4.50ms
+seq_len: 2048   slower: 1.29x   kernel: 20.60ms baseline: 15.91ms
+seq_len: 4096   slower: 1.30x   kernel: 78.93ms baseline: 60.81ms
+seq_len: 8192   slower: 0.00x   kernel: 314.51ms    baseline: oom
+------------------------------------------------------------
+float16     batch: 4    heads: 8    dim 64
+------------------------------------------------------------
+seq_len: 128    slower: 0.91x   kernel: 0.50ms  baseline: 0.55ms
+seq_len: 256    slower: 1.06x   kernel: 0.58ms  baseline: 0.55ms
+seq_len: 512    slower: 1.13x   kernel: 0.81ms  baseline: 0.72ms
+seq_len: 1024   slower: 0.97x   kernel: 2.09ms  baseline: 2.16ms
+seq_len: 2048   slower: 0.96x   kernel: 7.06ms  baseline: 7.35ms
+seq_len: 4096   slower: 0.97x   kernel: 26.08ms baseline: 26.84ms
+seq_len: 8192   slower: 0.00x   kernel: 101.02ms    baseline: oom
+```
+
+Forward & Backwards - F32 is definitely slower
 
 ```bash
 ------------------------------------------------------------
