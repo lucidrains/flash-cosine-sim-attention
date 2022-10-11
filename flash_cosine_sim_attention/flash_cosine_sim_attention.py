@@ -200,6 +200,9 @@ def flash_cosine_sim_attention_cpu(
             col_chunk_size = kc.shape[-2]
             k_start_index = k_ind * col_tile_size
 
+            if causal and q_start_index >= (k_start_index + col_tile_size - 1):
+                continue
+
             attn_weights = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', qc, kc) * scale
 
             if exists(bias):
