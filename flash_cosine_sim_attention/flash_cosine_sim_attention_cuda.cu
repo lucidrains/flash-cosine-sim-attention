@@ -936,7 +936,7 @@ __global__ void forward_kernel(
         }
     }
 
-    L_acc.pointwise([](float el) { return 1.f / max(el, 1e-10); }); // get inverse of rowsums
+    L_acc.pointwise([](float el) { return __frcp_ru(max(el, 1e-10)); }); // get inverse of rowsums
 
     if (need_store_rowsum)
         L_acc.store(l_, row_tile_offset, row_seq_len);
