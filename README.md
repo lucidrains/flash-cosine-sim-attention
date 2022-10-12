@@ -160,13 +160,15 @@ out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 
 ## Todo
 
+- [ ] make attention tile size processing customizable for backwards pass
 - [ ] bfloat16 support, use sfinae as recommended by Arthur
-- [ ] flexible which type is used for accumulation
-- [ ] support O(n) 1d dynamic positional bias
 - [ ] stream from qk_mma to shared memory in chunks to calculate out mma, see if freed smem can be used for caching more
 - [ ] prepare a smem fragment caching mechanism, to allow for as much caching as allowed on A100 (or f16). also allow for transposed access to smem data
-- [ ] make attention tile size processing customizable for backwards pass
+- [ ] think about use of logsumexp
+- [ ] support O(n) 1d dynamic positional bias
 
+- [x] move atomic add to overloaded function inside mma
+- [x] flexible which type is used for accumulation
 - [x] test out 64x96 tiles on f16
 - [x] bring in a CPU memory efficient version (only for inference, as training does not make sense) using just plain pytorch code
 - [x] figure out how to dispatch differently for architectures (say A100), in case backwards can make use of the increase in shared memory differently
@@ -228,24 +230,23 @@ Forward
 ------------------------------------------------------------
 float32     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 1.06x   kernel: 0.24ms  baseline: 0.23ms
-seq_len: 256    slower: 1.24x   kernel: 0.37ms  baseline: 0.30ms
+seq_len: 128    slower: 1.05x   kernel: 0.24ms  baseline: 0.23ms
+seq_len: 256    slower: 1.27x   kernel: 0.38ms  baseline: 0.30ms
 seq_len: 512    slower: 1.28x   kernel: 0.87ms  baseline: 0.68ms
-seq_len: 1024   slower: 1.26x   kernel: 2.96ms  baseline: 2.35ms
-seq_len: 2048   slower: 0.99x   kernel: 8.01ms  baseline: 8.13ms
-seq_len: 4096   slower: 0.89x   kernel: 30.91ms baseline: 34.85ms
-seq_len: 8192   slower: 0.00x   kernel: 122.31ms    baseline: oom
+seq_len: 1024   slower: 1.15x   kernel: 2.63ms  baseline: 2.28ms
+seq_len: 2048   slower: 0.99x   kernel: 7.99ms  baseline: 8.10ms
+seq_len: 4096   slower: 0.88x   kernel: 30.82ms baseline: 34.84ms
+seq_len: 8192   slower: 0.00x   kernel: 121.96ms    baseline: oom
 ------------------------------------------------------------
 float16     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.81x   kernel: 0.20ms  baseline: 0.24ms
-seq_len: 256    slower: 0.99x   kernel: 0.24ms  baseline: 0.24ms
-seq_len: 512    slower: 1.18x   kernel: 0.42ms  baseline: 0.36ms
-seq_len: 1024   slower: 0.92x   kernel: 0.90ms  baseline: 0.98ms
-seq_len: 2048   slower: 0.86x   kernel: 3.01ms  baseline: 3.50ms
-seq_len: 4096   slower: 0.80x   kernel: 10.46ms baseline: 12.99ms
-seq_len: 8192   slower: 0.00x   kernel: 40.62ms baseline: oom
-
+seq_len: 128    slower: 0.85x   kernel: 0.20ms  baseline: 0.24ms
+seq_len: 256    slower: 0.97x   kernel: 0.24ms  baseline: 0.25ms
+seq_len: 512    slower: 1.22x   kernel: 0.43ms  baseline: 0.35ms
+seq_len: 1024   slower: 0.95x   kernel: 0.93ms  baseline: 0.98ms
+seq_len: 2048   slower: 0.90x   kernel: 3.16ms  baseline: 3.50ms
+seq_len: 4096   slower: 0.85x   kernel: 11.06ms baseline: 13.07ms
+seq_len: 8192   slower: 0.00x   kernel: 42.61ms baseline: oom
 ```
 
 Backwards - still needs work
