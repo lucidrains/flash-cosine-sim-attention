@@ -68,7 +68,7 @@ def plain_cosine_sim_attention(
     v,
     mask = None,
     attn_bias = None,
-    scale = 10,
+    scale = 8,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False
@@ -300,7 +300,7 @@ def flash_cosine_sim_attention(
     v,
     mask = None,
     attn_bias = None,
-    scale = 10,
+    scale = 8,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False

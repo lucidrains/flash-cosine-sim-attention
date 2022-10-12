@@ -831,8 +831,6 @@ __global__ void forward_kernel(
     using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
     using out_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head, true>;
 
-    float bias;
-
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
     rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t> L_acc;
@@ -920,7 +918,7 @@ __global__ void forward_kernel(
 
                 shift = min(shift, (float) attn_row);
 
-            bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
+            float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
             return __expf(scale * el + bias - shift);
         });
@@ -1165,10 +1163,6 @@ __global__ void backward_kernel(
     auto ds_ = has_attn_bias ? d_attn_bias[attn_bias_batch_dim ? batch_idx : head_idx] : d_attn_bias[0];
     auto bias_ = has_attn_bias ? attn_bias[attn_bias_batch_dim ? batch_idx : head_idx] : attn_bias[0];
 
-    // variables
-
-    float bias;
-
     // loop over column tiles
 
     int col_tile_offset = (blockIdx.y * col_tile_size);
@@ -1223,7 +1217,7 @@ __global__ void backward_kernel(
 
                 shift = min(shift, (float) attn_row);
 
-            bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
+            float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
             return __expf(scale * el + bias - shift) * L_sm.smem[row];
         });
