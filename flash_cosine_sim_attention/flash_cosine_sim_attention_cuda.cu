@@ -231,6 +231,12 @@ namespace layout {
         static constexpr int TPB = 256;
     };
 
+    // derive max mem size at compile time
+
+    __device__ constexpr int constexpr_max(int x, int y) {
+        return (x > y) ? x : y;
+    }
+
     // shared memory sizes that depends on layout, if needed
 
     template<typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
@@ -246,7 +252,10 @@ namespace layout {
         static constexpr int backward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +    // q
             SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +    // k
-            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) + // c
+            constexpr_max(
+                SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
+                SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
+            ) +
             SMEM_SIZE(scalar_t, 1, row_tile_size) +
             SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
         );
@@ -1258,7 +1267,7 @@ __global__ void backward_kernel(
         // calculate ds = (dp - delta) * p
 
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
-            return (el - D_sm.smem[row]) * C_sm_t(col, row);
+            return (el - D_sm.smem[row]) * C_sm(col, row);
         });
 
         __syncthreads();
