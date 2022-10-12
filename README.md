@@ -362,75 +362,75 @@ Forwards
 
 ```bash
 ------------------------------------------------------------
-float32     batch: 4    heads: 8    dim 64  
+float32     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 1.05x   kernel: 0.31ms  baseline: 0.29ms
-seq_len: 256    slower: 1.18x   kernel: 0.35ms  baseline: 0.30ms
-seq_len: 512    slower: 0.96x   kernel: 0.54ms  baseline: 0.56ms
-seq_len: 1024   slower: 0.87x   kernel: 1.24ms  baseline: 1.43ms
-seq_len: 2048   slower: 0.87x   kernel: 4.17ms  baseline: 4.82ms
-seq_len: 4096   slower: 0.79x   kernel: 14.53ms baseline: 18.37ms
-seq_len: 8192   slower: 0.64x   kernel: 55.05ms baseline: 85.83ms
+seq_len: 128    slower: 0.98x   kernel: 0.29ms  baseline: 0.30ms
+seq_len: 256    slower: 1.19x   kernel: 0.35ms  baseline: 0.29ms
+seq_len: 512    slower: 0.94x   kernel: 0.52ms  baseline: 0.55ms
+seq_len: 1024   slower: 0.75x   kernel: 1.23ms  baseline: 1.65ms
+seq_len: 2048   slower: 0.88x   kernel: 4.17ms  baseline: 4.73ms
+seq_len: 4096   slower: 0.79x   kernel: 14.53ms baseline: 18.36ms
+seq_len: 8192   slower: 0.64x   kernel: 55.01ms baseline: 85.93ms
 ------------------------------------------------------------
-float16     batch: 4    heads: 8    dim 64  
+float16     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.85x   kernel: 0.25ms  baseline: 0.30ms
-seq_len: 256    slower: 1.03x   kernel: 0.31ms  baseline: 0.30ms
-seq_len: 512    slower: 1.21x   kernel: 0.37ms  baseline: 0.30ms
-seq_len: 1024   slower: 1.46x   kernel: 0.79ms  baseline: 0.54ms
-seq_len: 2048   slower: 1.29x   kernel: 2.05ms  baseline: 1.59ms
-seq_len: 4096   slower: 1.19x   kernel: 6.78ms  baseline: 5.71ms
-seq_len: 8192   slower: 1.05x   kernel: 24.42ms baseline: 23.15ms
+seq_len: 128    slower: 0.84x   kernel: 0.24ms  baseline: 0.29ms
+seq_len: 256    slower: 1.02x   kernel: 0.29ms  baseline: 0.29ms
+seq_len: 512    slower: 1.24x   kernel: 0.36ms  baseline: 0.29ms
+seq_len: 1024   slower: 1.48x   kernel: 0.79ms  baseline: 0.54ms
+seq_len: 2048   slower: 1.31x   kernel: 2.08ms  baseline: 1.59ms
+seq_len: 4096   slower: 1.21x   kernel: 6.89ms  baseline: 5.70ms
+seq_len: 8192   slower: 1.07x   kernel: 24.80ms baseline: 23.15ms
 ```
 
 Backwards
 
 ```bash
 ------------------------------------------------------------
-float32     batch: 4    heads: 8    dim 64  
+float32     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.95x   kernel: 0.58ms  baseline: 0.61ms
-seq_len: 256    slower: 1.28x   kernel: 0.76ms  baseline: 0.59ms
-seq_len: 512    slower: 1.17x   kernel: 1.30ms  baseline: 1.11ms
-seq_len: 1024   slower: 0.98x   kernel: 3.13ms  baseline: 3.18ms
-seq_len: 2048   slower: 1.05x   kernel: 11.18ms baseline: 10.62ms
-seq_len: 4096   slower: 0.99x   kernel: 40.19ms baseline: 40.76ms
-seq_len: 8192   slower: 0.98x   kernel: 155.64ms    baseline: 159.08ms
+seq_len: 128    slower: 0.94x   kernel: 0.57ms  baseline: 0.60ms
+seq_len: 256    slower: 1.29x   kernel: 0.75ms  baseline: 0.58ms
+seq_len: 512    slower: 1.16x   kernel: 1.30ms  baseline: 1.12ms
+seq_len: 1024   slower: 0.98x   kernel: 3.14ms  baseline: 3.19ms
+seq_len: 2048   slower: 1.05x   kernel: 11.13ms baseline: 10.63ms
+seq_len: 4096   slower: 0.98x   kernel: 40.11ms baseline: 40.79ms
+seq_len: 8192   slower: 0.97x   kernel: 154.96ms    baseline: 159.70ms
 ------------------------------------------------------------
-float16     batch: 4    heads: 8    dim 64  
+float16     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.91x   kernel: 0.56ms  baseline: 0.61ms
-seq_len: 256    slower: 1.02x   kernel: 0.63ms  baseline: 0.61ms
-seq_len: 512    slower: 1.35x   kernel: 0.82ms  baseline: 0.61ms
-seq_len: 1024   slower: 1.52x   kernel: 1.53ms  baseline: 1.01ms
-seq_len: 2048   slower: 1.35x   kernel: 4.10ms  baseline: 3.03ms
-seq_len: 4096   slower: 1.31x   kernel: 14.08ms baseline: 10.71ms
-seq_len: 8192   slower: 1.32x   kernel: 53.33ms baseline: 40.26ms
+seq_len: 128    slower: 0.91x   kernel: 0.55ms  baseline: 0.60ms
+seq_len: 256    slower: 1.03x   kernel: 0.62ms  baseline: 0.60ms
+seq_len: 512    slower: 1.36x   kernel: 0.82ms  baseline: 0.60ms
+seq_len: 1024   slower: 1.52x   kernel: 1.52ms  baseline: 1.01ms
+seq_len: 2048   slower: 1.37x   kernel: 4.14ms  baseline: 3.03ms
+seq_len: 4096   slower: 1.33x   kernel: 14.23ms baseline: 10.71ms
+seq_len: 8192   slower: 1.34x   kernel: 53.90ms baseline: 40.28ms
 ````
 
 Forwards & Backwards
 
 ```bash
 ------------------------------------------------------------
-float32     batch: 4    heads: 8    dim 64  
+float32     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.92x   kernel: 0.83ms  baseline: 0.90ms
-seq_len: 256    slower: 1.21x   kernel: 1.09ms  baseline: 0.90ms
-seq_len: 512    slower: 1.09x   kernel: 1.82ms  baseline: 1.67ms
-seq_len: 1024   slower: 0.95x   kernel: 4.38ms  baseline: 4.62ms
-seq_len: 2048   slower: 0.99x   kernel: 15.32ms baseline: 15.41ms
-seq_len: 4096   slower: 0.92x   kernel: 54.76ms baseline: 59.32ms
-seq_len: 8192   slower: 0.91x   kernel: 210.76ms    baseline: 230.53ms
+seq_len: 128    slower: 0.92x   kernel: 0.80ms  baseline: 0.87ms
+seq_len: 256    slower: 1.23x   kernel: 1.07ms  baseline: 0.87ms
+seq_len: 512    slower: 1.08x   kernel: 1.80ms  baseline: 1.66ms
+seq_len: 1024   slower: 0.94x   kernel: 4.33ms  baseline: 4.62ms
+seq_len: 2048   slower: 0.99x   kernel: 15.26ms baseline: 15.44ms
+seq_len: 4096   slower: 0.93x   kernel: 54.78ms baseline: 59.21ms
+seq_len: 8192   slower: 0.91x   kernel: 210.38ms    baseline: 230.97ms
 ------------------------------------------------------------
-float16     batch: 4    heads: 8    dim 64  
+float16     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.89x   kernel: 0.80ms  baseline: 0.90ms
-seq_len: 256    slower: 1.00x   kernel: 0.90ms  baseline: 0.90ms
-seq_len: 512    slower: 1.33x   kernel: 1.20ms  baseline: 0.90ms
-seq_len: 1024   slower: 1.49x   kernel: 2.32ms  baseline: 1.56ms
-seq_len: 2048   slower: 1.32x   kernel: 6.14ms  baseline: 4.64ms
-seq_len: 4096   slower: 1.27x   kernel: 20.85ms baseline: 16.48ms
-seq_len: 8192   slower: 1.23x   kernel: 77.80ms baseline: 63.42ms
+seq_len: 128    slower: 0.90x   kernel: 0.78ms  baseline: 0.86ms
+seq_len: 256    slower: 1.00x   kernel: 0.87ms  baseline: 0.87ms
+seq_len: 512    slower: 1.36x   kernel: 1.18ms  baseline: 0.86ms
+seq_len: 1024   slower: 1.49x   kernel: 2.31ms  baseline: 1.55ms
+seq_len: 2048   slower: 1.33x   kernel: 6.17ms  baseline: 4.63ms
+seq_len: 4096   slower: 1.28x   kernel: 21.08ms baseline: 16.44ms
+seq_len: 8192   slower: 1.24x   kernel: 78.75ms baseline: 63.45ms
 ```
 
 Autoregressive
