@@ -42,6 +42,12 @@ __host__ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
 
+// overloaded atomic add for automatic half to float conversion
+
+__device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
+    atomicAdd(address, __half2float(val));
+}
+
 // shared memory struct
 
 namespace mem {
@@ -448,7 +454,7 @@ namespace layout {
 #include <mma.h>
 
 namespace mma {
-    template<typename scalar_t, int tpb, int N_tile_, int M_tile_>
+    template<typename scalar_t, int tpb, int N_tile_, int M_tile_, bool accum_float>
     struct warp_tile {
 
         using l = layout::warp<scalar_t, tpb, N_tile_, M_tile_>;
@@ -595,8 +601,8 @@ namespace mma {
     };
 
     using namespace nvcuda;
-    template<int dim_head, int N_tile_, int M_tile_>
-    struct warp_tile<at::Half, dim_head, N_tile_, M_tile_> {
+    template<int dim_head, int N_tile_, int M_tile_, bool accum_float>
+    struct warp_tile<at::Half, dim_head, N_tile_, M_tile_, accum_float> {
 
         using l = layout::warp<at::Half, dim_head, N_tile_, M_tile_>;
 
@@ -617,10 +623,11 @@ namespace mma {
         static constexpr int M_tile = M_tile_;
         static constexpr int K_tile = 16;
 
-        using output_t = half;
+        using accum_type = typename std::conditional<accum_float, float, half>::type;
+        using accum_type_cast = typename std::conditional<accum_float, float, c10::Half>::type;
 
         // Registers:
-        wmma::fragment<wmma::accumulator, N_warp, M_warp, K_tile, half> C_frag[N_thread * M_thread];
+        wmma::fragment<wmma::accumulator, N_warp, M_warp, K_tile, accum_type> C_frag[N_thread * M_thread];
 
         int warp_x;   // x offset of the warp within the block tile
         int warp_y;   // y offset of the warp within the block tile
@@ -639,7 +646,7 @@ namespace mma {
                 for (int j = 0; j < M_thread; j++) {
                     #pragma unroll
                     for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
-                        C_frag[i * M_thread + j].x[k] = (at::Half) 0.f;
+                        C_frag[i * M_thread + j].x[k] = (accum_type_cast) 0.f;
                     }
                 }
             }
@@ -770,7 +777,7 @@ namespace mma {
                         if (col >= col_max || row >= row_max)
                             continue;
 
-                        atomicAdd((float*) &gmem[row][col], __half2float(C_frag[i * M_thread + j].x[k]));
+                        atomicAdd((float*) &gmem[row][col], C_frag[i * M_thread + j].x[k]);
                     }
                 }
             }
@@ -812,8 +819,8 @@ __global__ void forward_kernel(
 
     // registers
 
-    using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size>;
-    using out_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head>;
+    using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
+    using out_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head, true>;
 
     float bias;
 
@@ -1068,10 +1075,10 @@ __global__ void backward_kernel(
 
     // registers
 
-    using QK_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size>;
-    using dV_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head>;
-    using dK_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head>;
-    using dQ_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head>;
+    using QK_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
+    using dV_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head, false>;
+    using dK_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head, false>;
+    using dQ_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head, true>;
 
     QK_mma_t QK_mma;
     dV_mma_t dv_mma;
