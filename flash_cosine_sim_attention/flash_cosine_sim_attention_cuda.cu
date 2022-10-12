@@ -313,16 +313,16 @@ namespace layout {
         static constexpr int col_tile_size = 64;
     };
 
-    template<int dim_head, bool is_forward>
-    struct attn<at::Half, dim_head, is_forward> {
+    template<typename scalar_t>
+    struct attn<scalar_t, 64, true> {
         static constexpr int row_tile_size = 64;
         static constexpr int col_tile_size = 64;
     };
 
-    template<>
-    struct attn<at::Half, 64, true> {
+    template<typename scalar_t>
+    struct attn<scalar_t, 64, false> {
         static constexpr int row_tile_size = 64;
-        static constexpr int col_tile_size = 96;
+        static constexpr int col_tile_size = 64;
     };
 
     // warp layout
@@ -361,6 +361,44 @@ namespace layout {
 
         static_assert(N_warp * N_block * N_thread == 64);
         static_assert(M_warp * M_block * M_thread == 64);
+    };
+
+    template<typename scalar_t>
+    struct warp<scalar_t, 256, 32, 128> {
+        static constexpr int N_warp = 8;
+        static constexpr int M_warp = 4;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 8;
+
+        // constraints
+        static_assert(N_warp * M_warp == 32);
+        static_assert(N_block * M_block * N_warp * M_warp == 256);
+
+        static_assert(N_warp * N_block * N_thread == 32);
+        static_assert(M_warp * M_block * M_thread == 128);
+    };
+
+    template<typename scalar_t>
+    struct warp<scalar_t, 256, 128, 32> {
+        static constexpr int N_warp = 4;
+        static constexpr int M_warp = 8;
+
+        static constexpr int N_block = 4;
+        static constexpr int M_block = 2;
+
+        static constexpr int N_thread = 8;
+        static constexpr int M_thread = 2;
+
+        // constraints
+        static_assert(N_warp * M_warp == 32);
+        static_assert(N_block * M_block * N_warp * M_warp == 256);
+
+        static_assert(N_warp * N_block * N_thread == 128);
+        static_assert(M_warp * M_block * M_thread == 32);
     };
 
     // f16
@@ -461,6 +499,48 @@ namespace layout {
 
         static_assert(N_thread * N_warp * N_block == 64);
         static_assert(M_thread * M_warp * M_block == 64);
+    };
+
+    template<>
+    struct warp<at::Half, 256, 32, 128> {
+        static constexpr int N_thread = 1;
+        static constexpr int M_thread = 2;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 2;
+        static constexpr int M_block = 4;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == 256);
+
+        static_assert(N_thread * N_warp * N_block == 32);
+        static_assert(M_thread * M_warp * M_block == 128);
+    };
+
+    template<>
+    struct warp<at::Half, 256, 128, 32> {
+        static constexpr int N_thread = 2;
+        static constexpr int M_thread = 1;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 4;
+        static constexpr int M_block = 2;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == 256);
+
+        static_assert(N_thread * N_warp * N_block == 128);
+        static_assert(M_thread * M_warp * M_block == 32);
     };
 }
 
