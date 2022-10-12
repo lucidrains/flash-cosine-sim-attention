@@ -213,6 +213,12 @@ struct rowsum_accumulator {
     }
 };
 
+// constants
+
+namespace constants {
+    static constexpr float eps = 1e-10;
+}
+
 // layout for every type of head dimension, not generalized yet
 
 namespace layout {
@@ -943,7 +949,7 @@ __global__ void forward_kernel(
         }
     }
 
-    L_acc.pointwise([](float el) { return __frcp_ru(max(el, 1e-10)); }); // get inverse of rowsums
+    L_acc.pointwise([](float el) { return __frcp_ru(max(el, constants::eps)); }); // get inverse of rowsums
 
     if (need_store_rowsum)
         L_acc.store(l_, row_tile_offset, row_seq_len);
