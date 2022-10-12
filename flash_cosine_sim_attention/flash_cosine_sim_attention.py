@@ -99,7 +99,8 @@ def plain_cosine_sim_attention(
     mask_value = -torch.finfo(sim.dtype).max
 
     if causal:
-        causal_mask = torch.ones(sim.shape[-2:], device = q.device, dtype = torch.bool).triu(1)
+        i, j = sim.shape[-2:]
+        causal_mask = torch.ones((i, j), device = q.device, dtype = torch.bool).triu(j - i + 1)
         sim = sim.masked_fill(causal_mask, mask_value)
 
     if exists(mask):
