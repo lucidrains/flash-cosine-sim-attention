@@ -329,25 +329,25 @@ For variable length sequences with masking, also a clear win. Assume on average 
 
 ```bash
 ------------------------------------------------------------
-float32     batch: 4    heads: 8    dim 64  
+float32     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.96x   kernel: 0.82ms  baseline: 0.86ms
-seq_len: 256    slower: 1.19x   kernel: 1.26ms  baseline: 1.06ms
-seq_len: 512    slower: 1.23x   kernel: 3.15ms  baseline: 2.56ms
-seq_len: 1024   slower: 0.90x   kernel: 7.89ms  baseline: 8.79ms
-seq_len: 2048   slower: 0.90x   kernel: 28.98ms baseline: 32.26ms
-seq_len: 4096   slower: 0.90x   kernel: 111.41ms    baseline: 124.14ms
-seq_len: 8192   slower: 0.00x   kernel: 442.79ms    baseline: oom
+seq_len: 128    slower: 0.95x   kernel: 0.84ms  baseline: 0.89ms
+seq_len: 256    slower: 1.19x   kernel: 1.28ms  baseline: 1.08ms
+seq_len: 512    slower: 1.23x   kernel: 3.19ms  baseline: 2.59ms
+seq_len: 1024   slower: 0.92x   kernel: 8.19ms  baseline: 8.88ms
+seq_len: 2048   slower: 0.92x   kernel: 30.08ms baseline: 32.57ms
+seq_len: 4096   slower: 0.94x   kernel: 123.20ms    baseline: 131.22ms
+seq_len: 8192   slower: 0.00x   kernel: 461.77ms    baseline: oom
 ------------------------------------------------------------
-float16     batch: 4    heads: 8    dim 64  
+float16     batch: 4    heads: 8    dim 64
 ------------------------------------------------------------
-seq_len: 128    slower: 0.80x   kernel: 0.69ms  baseline: 0.86ms
-seq_len: 256    slower: 0.94x   kernel: 0.81ms  baseline: 0.86ms
-seq_len: 512    slower: 0.85x   kernel: 1.18ms  baseline: 1.39ms
-seq_len: 1024   slower: 0.70x   kernel: 2.98ms  baseline: 4.27ms
-seq_len: 2048   slower: 0.66x   kernel: 10.15ms baseline: 15.35ms
-seq_len: 4096   slower: 0.65x   kernel: 37.49ms baseline: 58.10ms
-seq_len: 8192   slower: 0.00x   kernel: 144.23ms    baseline: oom
+seq_len: 128    slower: 0.85x   kernel: 0.77ms  baseline: 0.90ms
+seq_len: 256    slower: 0.93x   kernel: 0.86ms  baseline: 0.93ms
+seq_len: 512    slower: 0.93x   kernel: 1.31ms  baseline: 1.40ms
+seq_len: 1024   slower: 0.76x   kernel: 3.31ms  baseline: 4.35ms
+seq_len: 2048   slower: 0.71x   kernel: 11.19ms baseline: 15.65ms
+seq_len: 4096   slower: 0.70x   kernel: 41.27ms baseline: 59.01ms
+seq_len: 8192   slower: 0.00x   kernel: 158.60ms    baseline: oom
 ```
 
 ### A100 40GB (wip)

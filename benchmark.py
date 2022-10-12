@@ -117,7 +117,7 @@ for name, dtype in (('float32', torch.float32), ('float16', torch.float16)):
                 baseline_args = {**baseline_args, 'causal_mask': causal_mask}
 
             if SHOULD_MASK:
-                mask = torch.zeros((batch, seq)).float().cuda().uniform_(0, 1) < args.mask_prob
+                mask = torch.zeros((batch, seq)).float().cuda().uniform_(0, 1) > args.mask_prob
 
                 fused_args = {**fused_args, 'mask': mask}
                 baseline_args = {**baseline_args, 'mask': mask}
