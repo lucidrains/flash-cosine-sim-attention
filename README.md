@@ -151,11 +151,13 @@ out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 
 ## Supported head dimensions
 
+- [x] 16 - f32
 - [x] 32
 - [x] 64
 - [x] 96
 - [x] 128
 
+- [ ] 16 -f16
 - [ ] 80 - in progress
 
 ## Todo

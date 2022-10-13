@@ -42,6 +42,10 @@ __host__ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
 
+__device__ constexpr int constexpr_max(int x, int y) {
+    return (x > y) ? x : y;
+}
+
 // overloaded atomic add for automatic half to float conversion
 
 __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
@@ -237,11 +241,10 @@ namespace layout {
         static constexpr int TPB = 256;
     };
 
-    // derive max mem size at compile time
-
-    __device__ constexpr int constexpr_max(int x, int y) {
-        return (x > y) ? x : y;
-    }
+    template<>
+    struct tpb<at::Half, 16> {
+        static constexpr int TPB = 128;
+    };
 
     // shared memory sizes that depends on layout, if needed
 
@@ -415,6 +418,27 @@ namespace layout {
 
         static constexpr int N_thread = N_tile_ / (N_warp * N_block);
         static constexpr int M_thread = M_tile_ / (M_warp * M_block);
+    };
+
+    template<>
+    struct warp<at::Half, 128, 64, 16> {
+        static constexpr int N_thread = 1;
+        static constexpr int M_thread = 1;
+
+        static constexpr int N_warp = 16;
+        static constexpr int M_warp = 16;
+
+        static constexpr int N_block = 4;
+        static constexpr int M_block = 1;
+
+        static constexpr int K_tile = 16;
+
+        // constraints
+        static_assert((N_warp == 16 && M_warp == 16) || (N_warp == 32 && M_warp == 8) || (N_warp == 8 && M_warp == 32));
+        static_assert(N_block * M_block * 32 == 128);
+
+        static_assert(N_thread * N_warp * N_block == 64);
+        static_assert(M_thread * M_warp * M_block == 16);
     };
 
     template<>
@@ -1070,7 +1094,7 @@ __global__ void backward_preprocess(
 
     // shared memory
 
-    __shared__ scalar_t _shared_mem_preprocess[dim_head / 32];
+    __shared__ scalar_t _shared_mem_preprocess[constexpr_max(dim_head / 32, 1)];
 
     scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
 
@@ -1457,7 +1481,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     const int v_dim     = v.size(3);
 
     assert(("query, key, value dimensions must be the same", q_dim == k_dim && k_dim == v_dim));
-    assert(("only dimensions 32, 64, 128 allowed for now", q_dim == 32 || q_dim == 64 || q_dim == 96 || q_dim == 128));
+    assert(("only dimensions 16, 32, 64, 96, 128 allowed for now", q_dim == 16 || q_dim == 32 || q_dim == 64 || q_dim == 96 || q_dim == 128));
     assert(("mask should not be given if causal", !(causal && mask.has_value())));
 
     // derived values
@@ -1494,7 +1518,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
-    VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
+    VALUE_DISPATCH_SWITCH(v_dim, dim_head, (16, 32, 64, 96, 128), (
 
         using layout_attn_tiles = layout::attn<scalar_t, dim_head, true>;
 
@@ -1634,7 +1658,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
     AT_TYPE_DISPATCH_SWITCH(dk_scalar_type, kv_scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half), (
-    VALUE_DISPATCH_SWITCH(v_dim, dim_head, (32, 64, 96, 128), (
+    VALUE_DISPATCH_SWITCH(v_dim, dim_head, (16, 32, 64, 96, 128), (
 
         using layout_attn_tiles = layout::attn<scalar_t, dim_head, false>;
 
