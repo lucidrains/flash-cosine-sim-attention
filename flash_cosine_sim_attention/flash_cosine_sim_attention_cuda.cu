@@ -297,6 +297,12 @@ struct rowsum_accumulator {
 
 namespace constants {
     static constexpr float eps = 1e-10;
+
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+        constexpr bool is_ampere_or_later = true;
+    #else
+        constexpr bool is_ampere_or_later = false;
+    #endif
 }
 
 // layout for every type of head dimension, not generalized yet
@@ -326,6 +332,35 @@ namespace layout {
 
     template<typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
     struct smem {
+        static constexpr bool forward_cache_q = false;
+        static constexpr int forward_q_total_frags = forward_cache_q ? (dim_head / chunk_size) : 0;
+        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 1;
+
+        static constexpr int forward_size = (
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
+            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) + // c
+            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
+        );
+
+        static constexpr int backward_size = (
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +    // q
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +    // k
+            max_(
+                SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
+                SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
+            ) +
+            SMEM_SIZE(scalar_t, 1, row_tile_size) +
+            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
+        );
+    };
+
+    template<typename scalar_t, int row_tile_size, int col_tile_size>
+    struct smem<scalar_t, row_tile_size, col_tile_size, 64> {
+
+        static constexpr bool forward_cache_q = false;
+        static constexpr int forward_q_total_frags = forward_cache_q ? (64 / chunk_size) : 0;
+        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 2;
 
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
@@ -349,6 +384,10 @@ namespace layout {
     template<typename scalar_t, int row_tile_size, int col_tile_size>
     struct smem<scalar_t, row_tile_size, col_tile_size, 96> {
 
+        static constexpr bool forward_cache_q = false;
+        static constexpr int forward_q_total_frags = forward_cache_q ? (96 / chunk_size) : 0;
+        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 2;
+
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
             SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
@@ -367,6 +406,10 @@ namespace layout {
 
     template<typename scalar_t, int row_tile_size, int col_tile_size>
     struct smem<scalar_t, row_tile_size, col_tile_size, 128> {
+
+        static constexpr bool forward_cache_q = false;
+        static constexpr int forward_q_total_frags = forward_cache_q ? (128 / chunk_size) : 0;
+        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 2;
 
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
@@ -1588,15 +1631,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
 
     auto o = at::empty({batch, heads, q_seq_len, v_dim}, options.dtype(q_scalar_type));
     auto l = at::empty({batch, heads, should_backwards ? q_seq_len : 0}, options.dtype(at::kFloat));
-
-    // store whether it is ampere or later gen, for differing logic for smem
-
-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-        constexpr bool IS_AMPERE_OR_LATER = true;
-    #else
-        constexpr bool IS_AMPERE_OR_LATER = false;
-    #endif
-
+    
     // dispatch forward call
 
     AT_TYPE_DISPATCH_SWITCH(q_scalar_type, scalar_t, (at::ScalarType::Float, at::ScalarType::Half, at::ScalarType::BFloat16), (
@@ -1727,14 +1762,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias_value, options_kfloat_dtype) : at::empty({attn_bias_value.size(0), 0, 0}, options_kfloat_dtype);
 
     auto dk_scalar_type = dk.scalar_type();
-
-    // store whether it is ampere or later gen, for differing logic for smem
-
-    #if defined(__CUDA_ARCH__) &&__CUDA_ARCH__ >= 800
-        constexpr bool IS_AMPERE_OR_LATER = true;
-    #else
-        constexpr bool IS_AMPERE_OR_LATER = false;
-    #endif
 
     // setup backwards call
 
