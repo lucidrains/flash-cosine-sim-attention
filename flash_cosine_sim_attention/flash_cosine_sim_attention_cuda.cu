@@ -75,11 +75,13 @@ __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
 namespace constants {
     static constexpr float eps = 1e-10;
 
-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-        constexpr bool is_ampere_or_later = true;
-    #else
-        constexpr bool is_ampere_or_later = false;
-    #endif
+    __device__ bool is_ampere_or_later() {
+        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+            return true;
+        #else
+            return false;
+        #endif
+    }
 }
 
 // shared memory struct
@@ -338,7 +340,9 @@ namespace layout {
     struct smem {
         static constexpr bool forward_cache_q = false;
         static constexpr int forward_q_total_frags = forward_cache_q ? (dim_head / chunk_size) : 0;
-        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 1;
+
+        static constexpr int forward_q_store_num_frags = 1;
+        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
 
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
@@ -364,7 +368,9 @@ namespace layout {
 
         static constexpr bool forward_cache_q = false;
         static constexpr int forward_q_total_frags = forward_cache_q ? (64 / chunk_size) : 0;
-        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 2;
+
+        static constexpr int forward_q_store_num_frags = 2;
+        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
 
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
@@ -390,7 +396,9 @@ namespace layout {
 
         static constexpr bool forward_cache_q = false;
         static constexpr int forward_q_total_frags = forward_cache_q ? (96 / chunk_size) : 0;
-        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 2;
+
+        static constexpr int forward_q_store_num_frags = 2;
+        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
 
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
@@ -413,7 +421,9 @@ namespace layout {
 
         static constexpr bool forward_cache_q = false;
         static constexpr int forward_q_total_frags = forward_cache_q ? (128 / chunk_size) : 0;
-        static constexpr int forward_q_store_num_frags = constants::is_ampere_or_later ? forward_q_total_frags : 2;
+
+        static constexpr int forward_q_store_num_frags = 2;
+        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
 
         static constexpr int forward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
@@ -1072,7 +1082,8 @@ __global__ void forward_kernel(
 
     using layout_ = layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>;
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size, true>;
+
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
@@ -1857,8 +1868,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
 // debug
 
-std::tuple<bool> debug() {
-    return { constants::is_ampere_or_later };
+std::tuple<> debug() {
+    return { };
 }
 
 // bind
