@@ -1023,6 +1023,8 @@ __global__ void forward_kernel(
 
     // shared memory
 
+    using layout_ = layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>;
+
     using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
@@ -1032,7 +1034,7 @@ __global__ void forward_kernel(
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
     using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>::forward_size];
+    __shared__ scalar_t _shared_mem[layout_::forward_size];
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
@@ -1069,7 +1071,9 @@ __global__ void forward_kernel(
 
         // get qk similarity matrix
 
-        for (int i = 0; i < dim_head; i += chunk_size) {
+        for (int i = 0, frag_idx = 0; i < dim_head; i += chunk_size, frag_idx++) {
+            Q_sm.set_frag_idx(frag_idx);
+
             Q_sm.load_transpose(Q_, i, row_tile_offset, 0, row_seq_len);
             K_sm.load_transpose(K_, i, col_tile_offset, 0, col_seq_len);
             __syncthreads();
@@ -1280,6 +1284,8 @@ __global__ void backward_kernel(
 
     // shared memory
 
+    using layout_ = layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>;
+
     using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
     using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
@@ -1300,7 +1306,7 @@ __global__ void backward_kernel(
     using DK_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
     using DV_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>::backward_size];
+    __shared__ scalar_t _shared_mem[layout_::backward_size];
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
