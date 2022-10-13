@@ -70,6 +70,18 @@ __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
     atomicAdd(address, __half2float(val));
 }
 
+// constants
+
+namespace constants {
+    static constexpr float eps = 1e-10;
+
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+        constexpr bool is_ampere_or_later = true;
+    #else
+        constexpr bool is_ampere_or_later = false;
+    #endif
+}
+
 // shared memory struct
 
 namespace mem {
@@ -292,18 +304,6 @@ struct rowsum_accumulator {
         gmem[row] = acc;
     }
 };
-
-// constants
-
-namespace constants {
-    static constexpr float eps = 1e-10;
-
-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-        constexpr bool is_ampere_or_later = true;
-    #else
-        constexpr bool is_ampere_or_later = false;
-    #endif
-}
 
 // layout for every type of head dimension, not generalized yet
 
