@@ -42,8 +42,26 @@ __host__ __device__ int cdiv(int numer, int denom) {
     return (numer + denom - 1) / denom;
 }
 
-__device__ constexpr int constexpr_max(int x, int y) {
-    return (x > y) ? x : y;
+template<typename T>
+__device__ constexpr T max_(T x) {
+    return x;
+}
+
+template<typename T, typename... Args>
+__device__ constexpr T max_(T x, Args... args) {
+    T rest_max = max_(args...);
+    return (x > rest_max) ? x : rest_max;
+}
+
+template<typename T>
+__device__ constexpr T min_(T x) {
+    return x;
+}
+
+template<typename T, typename... Args>
+__device__ constexpr T min_(T x, Args... args) {
+    T rest_min = min_(args...);
+    return (x < rest_min) ? x : rest_min;
 }
 
 // overloaded atomic add for automatic half to float conversion
@@ -55,13 +73,22 @@ __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
 // shared memory struct
 
 namespace mem {
-    template<typename T, int N_tile, int M_tile, bool add_padding = true>
+    template<typename T, int N_tile, int M_tile, bool add_padding = true, int num_frags_ = 1, int total_frags_ = 0>
     struct shared_fragment {
         static constexpr int N = N_tile;
         static constexpr int M = M_tile;
         static constexpr int stride = M + (add_padding ? (sizeof(T) == 2 ? 8 : 1) : 0);
-        static constexpr int size = N * stride;
 
+        static constexpr int num_frags = num_frags_;
+        static constexpr int total_frags = total_frags_;
+        static constexpr int frag_size = N * stride;
+        static constexpr int size = frag_size * num_frags_;
+
+        static constexpr bool all_cached = num_frags_ == total_frags_;
+        static constexpr bool no_cache = total_frags_ == 0 || (total_frags_ > 1 && num_frags_ == 1);
+
+        int offset = 0;
+        int curr_frag_idx = 0;
         T* smem;
 
         __device__ shared_fragment(char* shared_base)
@@ -69,7 +96,15 @@ namespace mem {
 
 
         __device__ T& operator()(int x, int y) {
-            return smem[y * stride + x];
+            return smem[y * stride + x + offset];
+        }
+
+        __device__ void set_frag_idx(int frag_idx) {
+            if (no_cache)
+                return;
+
+            curr_frag_idx = min(frag_idx, num_frags - 1);
+            offset = curr_frag_idx * frag_size;
         }
 
         template<typename accessor>
@@ -79,7 +114,7 @@ namespace mem {
                 int y = i / M;
                 int gx = x + tile_x;
                 int gy = y + tile_y;
-                int s_ind = y * stride + x;
+                int s_ind = y * stride + x + offset;
 
                 if ((max_x > 0  && gx >= max_x) || (max_y > 0 && gy >= max_y)) {
                     smem[s_ind] = 0.f;
@@ -97,7 +132,7 @@ namespace mem {
                 int y = i / N;
                 int gx = x + tile_x;
                 int gy = y + tile_y;
-                int s_ind = x * stride + y;
+                int s_ind = x * stride + y + offset;
 
                 if ((max_x > 0  && gx >= max_x) || (max_y > 0 && gy >= max_y)) {
                     smem[s_ind] = 0.f;
@@ -115,7 +150,7 @@ namespace mem {
                 int y = i / M;
                 int gx = x + tile_x;
                 int gy = y + tile_y;
-                int s_ind = y * stride + x;
+                int s_ind = y * stride + x + offset;
 
                 if ((max_x > 0  && gx >= max_x) || (max_y > 0 && gy >= max_y))
                     continue;
@@ -261,7 +296,7 @@ namespace layout {
         static constexpr int backward_size = (
             SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +    // q
             SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +    // k
-            constexpr_max(
+            max_(
                 SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
                 SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
             ) +
@@ -1094,7 +1129,7 @@ __global__ void backward_preprocess(
 
     // shared memory
 
-    __shared__ scalar_t _shared_mem_preprocess[constexpr_max(dim_head / 32, 1)];
+    __shared__ scalar_t _shared_mem_preprocess[max_(dim_head / 32, 1)];
 
     scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
 
