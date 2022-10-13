@@ -879,7 +879,7 @@ namespace mma {
         using accum_type_cast = typename std::conditional<accum_float, float, c10::Half>::type;
 
         // Registers:
-        wmma::fragment<wmma::accumulator, N_warp, M_warp, K_tile, accum_type> C_frag[N_thread * M_thread];
+        wmma::fragment<wmma::accumulator, M_warp, N_warp, K_tile, accum_type> C_frag[N_thread * M_thread];
 
         int warp_x;   // x offset of the warp within the block tile
         int warp_y;   // y offset of the warp within the block tile
@@ -907,8 +907,8 @@ namespace mma {
         // Performs C = A * B + C
         template<typename fragA, typename fragB>
         __device__ void mma(fragA& A_sm, fragB& B_sm, int ka0, int kb0, int D) {
-            wmma::fragment<wmma::matrix_a, N_warp, M_warp, K_tile, half, wmma::col_major> A_frag;
-            wmma::fragment<wmma::matrix_b, N_warp, M_warp, K_tile, half, wmma::row_major> B_frag;
+            wmma::fragment<wmma::matrix_a, M_warp, N_warp, K_tile, half, wmma::col_major> A_frag;
+            wmma::fragment<wmma::matrix_b, M_warp, N_warp, K_tile, half, wmma::row_major> B_frag;
 
             for (int k = 0; k < D; k += K_tile) {
                 #pragma unroll
