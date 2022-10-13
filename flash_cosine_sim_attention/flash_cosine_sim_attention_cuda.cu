@@ -148,10 +148,14 @@ namespace mem {
             is_cached[curr_frag_idx] = true;
         }
 
+        __device__ bool curr_frag_idx_cached() {
+            return !no_cache && is_cached[curr_frag_idx];
+        }
+
         template<typename accessor>
         __device__ void load(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
 
-            if (!no_cache && is_cached[curr_frag_idx])
+            if (curr_frag_idx_cached())
                 return;
 
             for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
@@ -175,7 +179,7 @@ namespace mem {
         template<typename accessor>
         __device__ void load_transpose(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
 
-            if (!no_cache && is_cached[curr_frag_idx])
+            if (curr_frag_idx_cached())
                 return;
 
             for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
