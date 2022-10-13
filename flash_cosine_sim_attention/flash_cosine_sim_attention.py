@@ -17,6 +17,7 @@ try:
 
     forward = cuda_pkg.forward
     backward = cuda_pkg.backward
+    debug = cuda_pkg.debug
 
 except ImportError:
     print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')

@@ -1855,9 +1855,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     return { dq, dk, dv, return_db };
 }
 
+// debug
+
+std::tuple<bool> debug() {
+    return { constants::is_ampere_or_later };
+}
+
 // bind
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward", &flash_cosine_sim_attention_forward, "Flash Cosine-Sim Attention Forward");
     m.def("backward", &flash_cosine_sim_attention_backward, "Flash Cosine-Sim Attention Backward");
+
+    m.def("debug", &debug, "Debugging purposes");
 }
