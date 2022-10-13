@@ -80,6 +80,7 @@ namespace mem {
         static constexpr int stride = M + (add_padding ? (sizeof(T) == 2 ? 8 : 1) : 0);
 
         static constexpr int num_frags = num_frags_;
+        static constexpr int last_frag_idx = num_frags_ - 1;
         static constexpr int total_frags = total_frags_;
         static constexpr int frag_size = N * stride;
         static constexpr int size = frag_size * num_frags_;
@@ -89,11 +90,24 @@ namespace mem {
 
         int offset = 0;
         int curr_frag_idx = 0;
+        bool is_cached[no_cache ? 0 : num_frags_];
+
         T* smem;
 
-        __device__ shared_fragment(char* shared_base)
-          : smem(reinterpret_cast<T*>(shared_base)) { }
+        __device__ void reset_is_cached() {
+            if (no_cache)
+                return;
 
+            #pragma unroll
+            for (int i = 0; i < num_frags_; i++) {
+                is_cached[i] = false;
+            }
+
+        }
+        __device__ shared_fragment(char* shared_base)
+            : smem(reinterpret_cast<T*>(shared_base)) {
+            reset_is_cached();
+        }
 
         __device__ T& operator()(int x, int y) {
             return smem[y * stride + x + offset];
@@ -103,12 +117,31 @@ namespace mem {
             if (no_cache)
                 return;
 
-            curr_frag_idx = min(frag_idx, num_frags - 1);
+            curr_frag_idx = min(frag_idx, last_frag_idx);
             offset = curr_frag_idx * frag_size;
+        }
+
+        __device__ void mark_cached() {
+            if (no_cache)
+                return;
+
+            if (all_cached && !is_cached[curr_frag_idx]) {
+                is_cached[curr_frag_idx] = true;
+                return;
+            }
+
+            if (curr_frag_idx == last_frag_idx || is_cached[curr_frag_idx])
+                return;
+
+            is_cached[curr_frag_idx] = true;
         }
 
         template<typename accessor>
         __device__ void load(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+
+            if (!no_cache && is_cached[curr_frag_idx])
+                return;
+
             for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
                 int x = i % M;
                 int y = i / M;
@@ -123,10 +156,16 @@ namespace mem {
 
                 smem[s_ind] = gmem[gy][gx];
             }
+
+            mark_cached();
         }
 
         template<typename accessor>
         __device__ void load_transpose(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+
+            if (!no_cache && is_cached[curr_frag_idx])
+                return;
+
             for (int i = threadIdx.x; i < N * M; i += blockDim.x) {
                 int x = i % N;
                 int y = i / N;
@@ -141,6 +180,8 @@ namespace mem {
 
                 smem[s_ind] = gmem[gy][gx];
             }
+
+            mark_cached();
         }
 
         template<typename accessor>
