@@ -74,14 +74,6 @@ __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
 
 namespace constants {
     static constexpr float eps = 1e-10;
-
-    __device__ bool is_ampere_or_later() {
-        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-            return true;
-        #else
-            return false;
-        #endif
-    }
 }
 
 // shared memory struct
@@ -93,18 +85,22 @@ namespace mem {
         static constexpr int M = M_tile;
         static constexpr int stride = M + (add_padding ? (sizeof(T) == 2 ? 8 : 1) : 0);
 
+        static_assert(num_frags_ >= 1);
+        static_assert(total_frags_ == 0 || num_frags_ <= total_frags_);
+
         static constexpr int num_frags = num_frags_;
-        static constexpr int last_frag_idx = num_frags_ - 1;
+
+        static constexpr int last_frag_idx = num_frags - 1;
         static constexpr int total_frags = total_frags_;
         static constexpr int frag_size = N * stride;
-        static constexpr int size = frag_size * num_frags_;
+        static constexpr int size = frag_size * num_frags;
 
-        static constexpr bool all_cached = num_frags_ == total_frags_;
-        static constexpr bool no_cache = total_frags_ == 0 || (total_frags_ > 1 && num_frags_ == 1);
+        static constexpr bool all_cached = num_frags == total_frags_;
+        static constexpr bool no_cache = total_frags_ == 0 || (total_frags_ > 1 && num_frags == 1);
 
         int offset = 0;
         int curr_frag_idx = 0;
-        bool is_cached[no_cache ? 0 : num_frags_];
+        bool is_cached[no_cache ? 0 : num_frags];
 
         T* smem;
 
@@ -113,7 +109,7 @@ namespace mem {
                 return;
 
             #pragma unroll
-            for (int i = 0; i < num_frags_; i++) {
+            for (int i = 0; i < num_frags; i++) {
                 is_cached[i] = false;
             }
 
@@ -338,22 +334,26 @@ namespace layout {
 
     template<typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
     struct smem {
-        static constexpr bool forward_cache_q = false;
-        static constexpr int forward_q_total_frags = forward_cache_q ? (dim_head / chunk_size) : 0;
 
-        static constexpr int forward_q_store_num_frags = 1;
-        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
+        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+            static constexpr int forward_q_store_num_frags = 1;
+        #else
+            static constexpr int forward_q_store_num_frags = 1;
+        #endif
 
         static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
-            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) + // c
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) * forward_q_store_num_frags +
+            max_(
+                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
+                SMEM_SIZE(scalar_t, chunk_size, dim_head)
+            ) +
+            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) +
             SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
 
         static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +    // q
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +    // k
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +
             max_(
                 SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
                 SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
@@ -366,22 +366,25 @@ namespace layout {
     template<typename scalar_t, int row_tile_size, int col_tile_size>
     struct smem<scalar_t, row_tile_size, col_tile_size, 64> {
 
-        static constexpr bool forward_cache_q = false;
-        static constexpr int forward_q_total_frags = forward_cache_q ? (64 / chunk_size) : 0;
-
-        static constexpr int forward_q_store_num_frags = 2;
-        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
+        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+            static constexpr int forward_q_store_num_frags = 1;
+        #else
+            static constexpr int forward_q_store_num_frags = 1;
+        #endif
 
         static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
-            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) + // c
+            SMEM_SIZE(scalar_t, chunk_size , row_tile_size) * forward_q_store_num_frags +
+            max_(
+                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
+                SMEM_SIZE(scalar_t, chunk_size, 64)
+            ) +
+            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) +
             SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
 
         static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +    // q
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +    // k
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +
+            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +
             max_(
                 SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
                 SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
@@ -394,23 +397,26 @@ namespace layout {
     template<typename scalar_t, int row_tile_size, int col_tile_size>
     struct smem<scalar_t, row_tile_size, col_tile_size, 96> {
 
-        static constexpr bool forward_cache_q = false;
-        static constexpr int forward_q_total_frags = forward_cache_q ? (96 / chunk_size) : 0;
-
-        static constexpr int forward_q_store_num_frags = 2;
-        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
+        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+            static constexpr int forward_q_store_num_frags = 1;
+        #else
+            static constexpr int forward_q_store_num_frags = 1;
+        #endif
 
         static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
-            SMEM_SIZE(scalar_t, row_tile_size, 96) +             // c
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) * forward_q_store_num_frags + 
+            max_(
+                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
+                SMEM_SIZE(scalar_t, chunk_size, 96)
+            ) +
+            SMEM_SIZE(scalar_t, row_tile_size, 96) +
             SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
 
         static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, 96) +                  // q
-            SMEM_SIZE(scalar_t, chunk_size, 96) +                  // k
-            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) +    // c
+            SMEM_SIZE(scalar_t, chunk_size, 96) +
+            SMEM_SIZE(scalar_t, chunk_size, 96) +
+            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) +
             SMEM_SIZE(scalar_t, 1, row_tile_size) +
             SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
         );
@@ -419,15 +425,18 @@ namespace layout {
     template<typename scalar_t, int row_tile_size, int col_tile_size>
     struct smem<scalar_t, row_tile_size, col_tile_size, 128> {
 
-        static constexpr bool forward_cache_q = false;
-        static constexpr int forward_q_total_frags = forward_cache_q ? (128 / chunk_size) : 0;
-
-        static constexpr int forward_q_store_num_frags = 2;
-        static constexpr int forward_q_store_num_frags_ampere = forward_q_total_frags;
+        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+            static constexpr int forward_q_store_num_frags = 1;
+        #else
+            static constexpr int forward_q_store_num_frags = 1;
+        #endif
 
         static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +   // q
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +   // k
+            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) * forward_q_store_num_frags +   // q
+            max_(
+                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
+                SMEM_SIZE(scalar_t, chunk_size, 128)
+            ) +
             SMEM_SIZE(scalar_t, row_tile_size, 128) +            // c
             SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
         );
@@ -1082,13 +1091,13 @@ __global__ void forward_kernel(
 
     using layout_ = layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>;
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size, true>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size, true, layout_::forward_q_store_num_frags, dim_head / chunk_size>;
 
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
     using C_sm_t = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
-    using mask_sm_t = mem::shared_fragment<bool, 2, col_tile_size, false>;
+    using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size, false>;
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
     using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
 
@@ -1097,11 +1106,16 @@ __global__ void forward_kernel(
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
     Q_sm_t Q_sm{__shared_mem};
-    V_sm_t V_sm{__shared_mem};
     O_sm_t O_sm{__shared_mem};
+
     K_sm_t K_sm{Q_sm.next()};
-    C_sm_t C_sm{K_sm.next()};
-    mask_sm_t mask_sm{K_sm.next()};
+    V_sm_t V_sm{Q_sm.next()};
+
+    auto next_ptr = K_sm_t::size > V_sm_t::size ? K_sm.next() : V_sm.next();
+
+    C_sm_t C_sm{next_ptr};
+    mask_sm_t mask_sm{next_ptr};
+
     L_sm_t L_sm{C_sm.next()};
 
     // shortcut accessors
@@ -1129,8 +1143,8 @@ __global__ void forward_kernel(
 
         // get qk similarity matrix
 
-        for (int i = 0, frag_idx = 0; i < dim_head; i += chunk_size, frag_idx++) {
-            Q_sm.set_frag_idx(frag_idx);
+        for (int i = 0, j = 0; i < dim_head; i += chunk_size, j++) {
+            Q_sm.set_frag_idx(j);
 
             Q_sm.load_transpose(Q_, i, row_tile_offset, 0, row_seq_len);
             K_sm.load_transpose(K_, i, col_tile_offset, 0, col_seq_len);

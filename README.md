@@ -162,12 +162,13 @@ out = flash_cosine_sim_attention(q, k, v, causal = True) # (32, 1024, 64)
 
 ## Todo
 
-- [ ] prepare a smem fragment caching mechanism, to allow for as much caching as allowed on A100 (or f16). also allow for transposed access to smem data
 - [ ] bfloat16 support, use sfinae as recommended by Arthur
 - [ ] stream from qk_mma to shared memory in chunks to calculate out mma, see if freed smem can be used for caching more
 - [ ] think about use of logsumexp
 - [ ] support O(n) 1d dynamic positional bias
+- [ ] figure out why smem fragment caching would lead to performance degrade, it does not make sense
 
+- [x] prepare a smem fragment caching mechanism, to allow for as much caching as allowed on A100 (or f16)
 - [x] make attention tile size processing customizable for backwards pass
 - [x] move atomic add to overloaded function inside mma
 - [x] flexible which type is used for accumulation
