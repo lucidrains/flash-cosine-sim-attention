@@ -28,9 +28,6 @@ void check(const char* file, const int line, const bool cuda_sync)
 
 #define ACCESSOR(x, n, type) x.packed_accessor32<type, n, torch::RestrictPtrTraits>()
 
-#define SMEM_SIZE(T, N_tile, M_tile) mem::shared_fragment<T, N_tile, M_tile>::size
-#define SMEM_SIZE_NO_PAD(T, N_tile, M_tile) mem::shared_fragment<T, N_tile, M_tile, false>::size
-
 // type alias
 
 template <typename scalar_t, int dims>
@@ -311,8 +308,6 @@ struct rowsum_accumulator {
 
 namespace layout {
 
-    static constexpr int chunk_size = 16;
-
     // threads per block
 
     template<typename scalar_t, int dim_head>
@@ -328,126 +323,6 @@ namespace layout {
     template<>
     struct tpb<at::Half, 16> {
         static constexpr int TPB = 128;
-    };
-
-    // shared memory sizes that depends on layout, if needed
-
-    template<typename scalar_t, int row_tile_size, int col_tile_size, int dim_head>
-    struct smem {
-
-        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-            static constexpr int forward_q_store_num_frags = 1;
-        #else
-            static constexpr int forward_q_store_num_frags = 1;
-        #endif
-
-        static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) * forward_q_store_num_frags +
-            max_(
-                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
-                SMEM_SIZE(scalar_t, chunk_size, dim_head)
-            ) +
-            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) +
-            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
-        );
-
-        static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +
-            max_(
-                SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
-                SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
-            ) +
-            SMEM_SIZE(scalar_t, 1, row_tile_size) +
-            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
-        );
-    };
-
-    template<typename scalar_t, int row_tile_size, int col_tile_size>
-    struct smem<scalar_t, row_tile_size, col_tile_size, 64> {
-
-        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-            static constexpr int forward_q_store_num_frags = 1;
-        #else
-            static constexpr int forward_q_store_num_frags = 1;
-        #endif
-
-        static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size , row_tile_size) * forward_q_store_num_frags +
-            max_(
-                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
-                SMEM_SIZE(scalar_t, chunk_size, 64)
-            ) +
-            SMEM_SIZE(scalar_t, col_tile_size, row_tile_size) +
-            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
-        );
-
-        static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) +
-            SMEM_SIZE(scalar_t, chunk_size, col_tile_size) +
-            max_(
-                SMEM_SIZE(scalar_t, row_tile_size, col_tile_size),
-                SMEM_SIZE(scalar_t, col_tile_size, row_tile_size)
-            ) +
-            SMEM_SIZE(scalar_t, 1, row_tile_size) +
-            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
-        );
-    };
-
-    template<typename scalar_t, int row_tile_size, int col_tile_size>
-    struct smem<scalar_t, row_tile_size, col_tile_size, 96> {
-
-        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-            static constexpr int forward_q_store_num_frags = 1;
-        #else
-            static constexpr int forward_q_store_num_frags = 1;
-        #endif
-
-        static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) * forward_q_store_num_frags + 
-            max_(
-                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
-                SMEM_SIZE(scalar_t, chunk_size, 96)
-            ) +
-            SMEM_SIZE(scalar_t, row_tile_size, 96) +
-            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
-        );
-
-        static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, 96) +
-            SMEM_SIZE(scalar_t, chunk_size, 96) +
-            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) +
-            SMEM_SIZE(scalar_t, 1, row_tile_size) +
-            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
-        );
-    };
-
-    template<typename scalar_t, int row_tile_size, int col_tile_size>
-    struct smem<scalar_t, row_tile_size, col_tile_size, 128> {
-
-        #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-            static constexpr int forward_q_store_num_frags = 1;
-        #else
-            static constexpr int forward_q_store_num_frags = 1;
-        #endif
-
-        static constexpr int forward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, row_tile_size) * forward_q_store_num_frags +   // q
-            max_(
-                SMEM_SIZE(scalar_t, chunk_size, col_tile_size),
-                SMEM_SIZE(scalar_t, chunk_size, 128)
-            ) +
-            SMEM_SIZE(scalar_t, row_tile_size, 128) +            // c
-            SMEM_SIZE_NO_PAD(float, row_tile_size, 1)
-        );
-
-        static constexpr int backward_size = (
-            SMEM_SIZE(scalar_t, chunk_size, 128) +                  // q
-            SMEM_SIZE(scalar_t, chunk_size, 128) +                  // k
-            SMEM_SIZE(scalar_t, row_tile_size, col_tile_size) +     // c
-            SMEM_SIZE(scalar_t, 1, row_tile_size) +
-            SMEM_SIZE_NO_PAD(bool, 1, col_tile_size)
-        );
     };
 
     // attention tile sizes
@@ -812,9 +687,11 @@ namespace mma {
         __device__ void store(shared_fragment& C_sm) {
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y;
                 #pragma unroll
                 for (int j = 0; j < M_thread ; j++) {
-                    C_sm(j * M_warp + thread_x, i * N_warp + thread_y) = C_frag[i * M_thread + j];
+                    int col = j * M_warp + thread_x;
+                    C_sm(col, row) = C_frag[i * M_thread + j];
                 }
             }
         }
@@ -823,9 +700,11 @@ namespace mma {
         __device__ void store_transpose(shared_fragment& C_sm) {
             #pragma unroll
             for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y;
                 #pragma unroll
                 for (int j = 0; j < M_thread ; j++) {
-                    C_sm(i * N_warp + thread_y, j * M_warp + thread_x) = C_frag[i * M_thread + j];
+                    int col = j * M_warp + thread_x;
+                    C_sm(row, col) = C_frag[i * M_thread + j];
                 }
             }
         }
@@ -1087,11 +966,15 @@ __global__ void forward_kernel(
     out_mma_t out_mma;
     rowsum_accumulator<scalar_t, QK_mma_t, out_mma_t> L_acc;
 
-    // shared memory
+    // shared memory templates and hyperparams
 
-    using layout_ = layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>;
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+        static constexpr int forward_q_store_num_frags = 1;
+    #else
+        static constexpr int forward_q_store_num_frags = 1;
+    #endif
 
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size, true, layout_::forward_q_store_num_frags, dim_head / chunk_size>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size, true, forward_q_store_num_frags, dim_head / chunk_size>;
 
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
@@ -1101,7 +984,24 @@ __global__ void forward_kernel(
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
     using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[layout_::forward_size];
+    // determine shared memory size
+
+    __shared__ scalar_t _shared_mem[
+        max_(
+            (
+                Q_sm_t::size * forward_q_store_num_frags +
+                max_(
+                    K_sm_t::size,
+                    V_sm_t::size
+                ) +
+                C_sm_t::size +
+                L_sm_t::size
+            ),
+            O_sm_t::size
+        )
+    ];
+
+    // layout shared memory
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
@@ -1354,9 +1254,8 @@ __global__ void backward_kernel(
     dK_mma_t dk_mma;
     dQ_mma_t dq_mma;
 
-    // shared memory
+    // shared memory templates and hyperparams
 
-    using layout_ = layout::smem<scalar_t, row_tile_size, col_tile_size, dim_head>;
 
     using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
     using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
@@ -1378,7 +1277,23 @@ __global__ void backward_kernel(
     using DK_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
     using DV_sm_t = mem::shared_fragment<scalar_t, col_tile_size, dim_head>;
 
-    __shared__ scalar_t _shared_mem[layout_::backward_size];
+    // determine shared memory size
+
+    __shared__ scalar_t _shared_mem[
+        max_(
+            max_(
+                max_(Q_sm_::size, Q_sm_t_::size) +
+                max_(K_sm_::size, K_sm_t_::size, V_sm_t::size) +
+                D_sm_t::size +
+                max_(C_sm_::size, C_sm_t_::size) +
+                mask_sm_t::size
+            ),
+            DK_sm_t::size,
+            DV_sm_t::size
+        )
+    ];
+
+    // shared memory layout
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
