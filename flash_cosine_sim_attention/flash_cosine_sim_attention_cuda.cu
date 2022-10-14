@@ -61,10 +61,21 @@ __device__ constexpr T min_(T x, Args... args) {
     return (x < rest_min) ? x : rest_min;
 }
 
+__host__ __device__ int next_pow_2(int n) {
+    int i = 1;
+    while(i < n)
+        i *= 2;
+    return i;
+}
+
 // overloaded atomic add for automatic half to float conversion
 
 __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
     atomicAdd(address, __half2float(val));
+}
+
+__device__ __forceinline__ void atomicAdd(float* address, c10::BFloat16 val) {
+    atomicAdd(address, (float) val);
 }
 
 // constants
@@ -251,7 +262,9 @@ namespace mem {
 template <typename scalar_t, typename warp_tile_t, typename out_warp_tile_t>
 struct rowsum_accumulator {
     static constexpr int N_tile = warp_tile_t::N_tile;
+
     static constexpr int M_tile = warp_tile_t::M_tile;
+    static constexpr int M_tile_next_pow_2 = next_pow_2(M_tile);
 
     float acc;
 
@@ -1092,8 +1105,6 @@ __global__ void forward_kernel(
 
         __syncthreads();
 
-        L_acc.add(C_sm, col_tile_offset, col_seq_len);
-
         // aggregate values with attention matrix
 
         for (int i = 0; i < col_tile_size; i += chunk_size) {
@@ -1103,6 +1114,8 @@ __global__ void forward_kernel(
             out_mma.mma(C_sm, V_sm, i, 0, chunk_size);
             __syncthreads();
         }
+
+        L_acc.add(C_sm, col_tile_offset, col_seq_len);
     }
 
     L_acc.pointwise([](float el) { return __frcp_ru(max(el, constants::eps)); }); // get inverse of rowsums
