@@ -1087,11 +1087,12 @@ __global__ void forward_kernel(
 
             float shift = scale;
 
-            if (causal && seq_len_diff == 0)
+            if (causal && seq_len_diff == 0) {
                 if (attn_row == 0)
                     return 1.f;
 
                 shift = min(shift, (float) attn_row);
+            }
 
             float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
@@ -1403,11 +1404,12 @@ __global__ void backward_kernel(
 
             float shift = scale;
 
-            if (causal && seq_len_diff == 0)
+            if (causal && seq_len_diff == 0) {
                 if (attn_row == 0)
                     return 1.f;
 
                 shift = min(shift, (float) attn_row);
+            }
 
             float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
