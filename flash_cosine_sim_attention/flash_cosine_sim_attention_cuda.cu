@@ -735,6 +735,33 @@ namespace mma {
             }
         }
 
+        // load from shared memory to registers
+        template<typename shared_fragment>
+        __device__ void load(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y;
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    int col = j * M_warp + thread_x;
+                    C_frag[i * M_thread + j] = C_sm(col, row);
+                }
+            }
+        }
+
+        template<typename shared_fragment>
+        __device__ void load_transpose(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y;
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    int col = j * M_warp + thread_x;
+                    C_frag[i * M_thread + j] = C_sm(row, col);
+                }
+            }
+        }
+
         // Stream C from registers to global memory using temporary shared memory buffer
         template<typename accessor, typename shared_fragment>
         __device__ void store(accessor gmem, shared_fragment& smem, int tile_x, int tile_y, int max_x, int max_y) {
@@ -932,6 +959,39 @@ namespace mma {
                         int col = get_warp_col(k) + (warp_x * M_thread + j) * M_warp;
                         int row = get_warp_row(k) + (warp_y * N_thread + i) * N_warp;
                         C_sm(row, col) = C_frag[i * M_thread + j].x[k];
+                    }
+                }
+            }
+        }
+
+        // load from shared memory to registers
+        template<typename shared_fragment>
+        __device__ void load(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    #pragma unroll
+                    for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
+                        int col = get_warp_col(k) + (warp_x * M_thread + j) * M_warp;
+                        int row = get_warp_row(k) + (warp_y * N_thread + i) * N_warp;
+                        C_frag[i * M_thread + j].x[k] = C_sm(col, row);
+                    }
+                }
+            }
+        }
+
+        template<typename shared_fragment>
+        __device__ void load_transpose(shared_fragment& C_sm) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    #pragma unroll
+                    for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
+                        int col = get_warp_col(k) + (warp_x * M_thread + j) * M_warp;
+                        int row = get_warp_row(k) + (warp_y * N_thread + i) * N_warp;
+                        C_frag[i * M_thread + j].x[k] = C_sm(row, col);
                     }
                 }
             }
@@ -1301,7 +1361,6 @@ __global__ void backward_kernel(
     dQ_mma_t dq_mma;
 
     // shared memory templates and hyperparams
-
 
     using Q_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
     using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
