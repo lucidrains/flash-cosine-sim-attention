@@ -1,13 +1,13 @@
 #include <cassert>
+#include <tuple>
 #include <type_traits>
+#include <unordered_set>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
-#include <tuple>
-#include <unordered_set>
 #include "dispatch.h"
 
 // error handler
@@ -1149,7 +1149,7 @@ __global__ void forward_kernel(
         L_acc.add(C_sm, col_tile_offset, col_seq_len);
     }
 
-    L_acc.pointwise([](float el) { return __frcp_ru(max(el, constants::eps)); }); // get inverse of rowsums
+    L_acc.pointwise([&](float el) { return __frcp_ru(max(el, constants::eps)); }); // get inverse of rowsums
 
     if (need_store_rowsum)
         L_acc.store(l_, row_tile_offset, row_seq_len);
@@ -1538,13 +1538,14 @@ __global__ void backward_kernel(
 
         dk_mma.atomic_add(dk_, col_tile_offset, 0, col_seq_len, dim_head);
 
-    } else {
-        dv_mma.store(dv_, DV_sm, 0, col_tile_offset, 0, col_seq_len);
-
-        __syncthreads();
-
-        dk_mma.store(dk_, DK_sm, 0, col_tile_offset, 0, col_seq_len);
+        return;
     }
+
+    dv_mma.store(dv_, DV_sm, 0, col_tile_offset, 0, col_seq_len);
+
+    __syncthreads();
+
+    dk_mma.store(dk_, DK_sm, 0, col_tile_offset, 0, col_seq_len);
 }
 
 // forwards c++ function
