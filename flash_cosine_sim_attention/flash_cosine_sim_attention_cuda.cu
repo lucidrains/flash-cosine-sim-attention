@@ -693,6 +693,21 @@ namespace mma {
             }
         }
 
+        // element-wise multiply two mmas
+        template<typename warp_tile>
+        __device__ void elem_mult(warp_tile& mma) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y;
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    int col = j * M_warp + thread_x;
+
+                    C_frag[i * M_thread + j] *= mma.C_frag[i * M_thread + j];
+                }
+            }
+        }
+
         // Copy C from registers to shared memory
         template<typename shared_fragment>
         __device__ void store(shared_fragment& C_sm) {
@@ -867,6 +882,23 @@ namespace mma {
                         int col = get_warp_col(k) + (warp_x * M_thread + j) * M_warp;
                         int row = get_warp_row(k) + (warp_y * N_thread + i) * N_warp;
                         C_frag[i * M_thread + j].x[k] = op(C_frag[i * M_thread + j].x[k], col, row);
+                    }
+                }
+            }
+        }
+
+        // Perform a pointwise operation, specified by the given lambda, on C
+        template<typename warp_tile>
+        __device__ void elem_mult(warp_tile& mma) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    #pragma unroll
+                    for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
+                        int col = get_warp_col(k) + (warp_x * M_thread + j) * M_warp;
+                        int row = get_warp_row(k) + (warp_y * N_thread + i) * N_warp;
+                        C_frag[i * M_thread + j].x[k] *= mma.C_frag[i * M_thread + j].x[k];
                     }
                 }
             }
@@ -1257,11 +1289,13 @@ __global__ void backward_kernel(
     // registers
 
     using QK_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
+    using dP_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
     using dV_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head, false>;
     using dK_mma_t = mma::warp_tile<scalar_t, tpb, col_tile_size, dim_head, false>;
     using dQ_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head, true>;
 
     QK_mma_t QK_mma;
+    dP_mma_t dP_mma;
     dV_mma_t dv_mma;
     dK_mma_t dk_mma;
     dQ_mma_t dq_mma;
@@ -1430,14 +1464,14 @@ __global__ void backward_kernel(
 
         // calculate dp
 
-        QK_mma.zero();
+        dP_mma.zero();
 
         for (int k = 0; k < dim_head; k += chunk_size) {
             DO_sm_t.load_transpose(do_, k, row_tile_offset, 0, row_seq_len);
             V_sm.load_transpose(v_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
 
-            QK_mma.mma(DO_sm_t, V_sm, 0, 0, chunk_size);
+            dP_mma.mma(DO_sm_t, V_sm, 0, 0, chunk_size);
             __syncthreads();
         }
 
@@ -1448,27 +1482,31 @@ __global__ void backward_kernel(
         __syncthreads();
 
         // delta = rowsum(do * o), precomputed in backward preprocess
+        // calculate ds = dp - delta
+
+        dP_mma.pointwise([&](scalar_t el, int, int row) -> scalar_t {
+            return (el - D_sm.smem[row]);
+        });
+
         // calculate ds = (dp - delta) * p
 
-        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
-            return (el - D_sm.smem[row]) * C_sm(col, row);
-        });
+        dP_mma.elem_mult(QK_mma);
 
         // accumulate to ds if needed
 
         if (has_attn_bias) {
-            QK_mma.atomic_add(ds_, row_tile_offset, col_tile_offset, row_seq_len, col_seq_len);
+            dP_mma.atomic_add(ds_, row_tile_offset, col_tile_offset, row_seq_len, col_seq_len);
         }
 
         // scale
 
-        QK_mma.pointwise([&](scalar_t el, int, int) -> scalar_t {
+        dP_mma.pointwise([&](scalar_t el, int, int) -> scalar_t {
             return el * scale;
         });
 
         __syncthreads();
 
-        QK_mma.store(C_sm);
+        dP_mma.store(C_sm);
 
         // calculate dk
 
@@ -1480,7 +1518,7 @@ __global__ void backward_kernel(
             __syncthreads();
         }
 
-        QK_mma.store_transpose(C_sm_t);
+        dP_mma.store_transpose(C_sm_t);
 
         dq_mma.zero();
 
