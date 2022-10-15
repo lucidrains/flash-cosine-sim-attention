@@ -7,6 +7,7 @@
 #include <torch/extension.h>
 
 #include <tuple>
+#include <unordered_set>
 #include "dispatch.h"
 
 // error handler
@@ -61,6 +62,11 @@ __device__ constexpr T min_(T x, Args... args) {
     return (x < rest_min) ? x : rest_min;
 }
 
+template<typename T, typename el_T>
+bool is_in(T container, el_T el) {
+    return container.find(el) != container.end();
+}
+
 // overloaded atomic add for automatic half to float conversion
 
 __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
@@ -75,6 +81,7 @@ __device__ __forceinline__ void atomicAdd(float* address, c10::BFloat16 val) {
 
 namespace constants {
     static constexpr float eps = 1e-10;
+    static std::unordered_set<int> allowed_dim_heads = {16, 32, 64, 96, 128};
 }
 
 // shared memory struct
@@ -1548,7 +1555,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     const int v_dim     = v.size(3);
 
     assert(("query, key, value dimensions must be the same", q_dim == k_dim && k_dim == v_dim));
-    assert(("only dimensions 16, 32, 64, 96, 128 allowed for now", q_dim == 16 || q_dim == 32 || q_dim == 64 || q_dim == 96 || q_dim == 128));
+    assert(("only dimensions 16, 32, 64, 96, 128 allowed for now", is_in(constants::allowed_dim_heads, q_dim)));
     assert(("mask should not be given if causal", !(causal && mask.has_value())));
 
     // derived values
