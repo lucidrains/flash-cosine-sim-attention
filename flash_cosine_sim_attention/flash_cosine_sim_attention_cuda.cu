@@ -61,13 +61,6 @@ __device__ constexpr T min_(T x, Args... args) {
     return (x < rest_min) ? x : rest_min;
 }
 
-__host__ __device__ int next_pow_2(int n) {
-    int i = 1;
-    while(i < n)
-        i *= 2;
-    return i;
-}
-
 // overloaded atomic add for automatic half to float conversion
 
 __device__ __forceinline__ void atomicAdd(float* address, c10::Half val) {
@@ -262,9 +255,7 @@ namespace mem {
 template <typename scalar_t, typename warp_tile_t, typename out_warp_tile_t>
 struct rowsum_accumulator {
     static constexpr int N_tile = warp_tile_t::N_tile;
-
     static constexpr int M_tile = warp_tile_t::M_tile;
-    static constexpr int M_tile_next_pow_2 = next_pow_2(M_tile);
 
     float acc;
 
@@ -1445,8 +1436,6 @@ __global__ void backward_kernel(
 
         // load pre-calculated delta
 
-        __syncthreads();
-
         D_sm.store_row(delta_, row_tile_offset, row_tile_size, row_seq_len);
 
         __syncthreads();
@@ -1457,8 +1446,6 @@ __global__ void backward_kernel(
         QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
             return (el - D_sm.smem[row]) * C_sm(col, row);
         });
-
-        __syncthreads();
 
         // accumulate to ds if needed
 
@@ -1476,8 +1463,6 @@ __global__ void backward_kernel(
 
         QK_mma.store(C_sm);
 
-        __syncthreads();
-
         // calculate dk
 
         for (int k = 0; k < row_tile_size; k += chunk_size) {
@@ -1489,8 +1474,6 @@ __global__ void backward_kernel(
         }
 
         QK_mma.store_transpose(C_sm_t);
-
-        __syncthreads();
 
         dq_mma.zero();
 
