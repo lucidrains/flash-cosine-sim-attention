@@ -47,11 +47,20 @@ def l2norm(t):
 
     return l2norm_cpu(t)
 
-def l2norm_tensors(*tensors):
+def grouped_l2norm(t, groups = 1):
+    shape = t.shape
+    dim = shape[-1]
+    t = t.reshape(*shape[:-1], groups, dim // groups)
+    t = F.normalize(t, p = 2, dim = -1)
+    return t.reshape(shape)
+
+def l2norm_tensors(*tensors, groups = 1):
     assert len(tensors) > 0
     dtype = tensors[0].dtype
 
-    tensors = tuple(map(l2norm, tensors))
+    fn = partial(grouped_l2norm, groups = groups)
+
+    tensors = tuple(map(fn, tensors))
     tensors = tuple(map(lambda t: t.type(dtype), tensors))
     return tensors
 
@@ -70,6 +79,7 @@ def plain_cosine_sim_attention(
     mask = None,
     attn_bias = None,
     scale = 8,
+    groups = 1,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False
@@ -87,7 +97,7 @@ def plain_cosine_sim_attention(
         q = q[:, None, ...]
 
     if l2norm_qk:
-        q, k = l2norm_tensors(q, k)
+        q, k = l2norm_tensors(q, k, groups = groups)
 
     kv_einsum_eq = 'b j d' if single_head_kv else 'b h j d'
     sim = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', q, k)
@@ -302,12 +312,13 @@ def flash_cosine_sim_attention(
     mask = None,
     attn_bias = None,
     scale = 8,
+    groups = 1,
     causal = False,
     l2norm_qk = True,
     attn_bias_batch_dim = False
 ):
     if l2norm_qk:
-        q, k = l2norm_tensors(q, k)
+        q, k = l2norm_tensors(q, k, groups = groups)
 
     fn = flash_cosine_sim_attention_cuda if q.data.is_cuda else flash_cosine_sim_attention_cpu
 
