@@ -8,6 +8,8 @@ Implementation of fused cosine similarity attention in the same style as <a href
 
 In other words, stable, fast, memory efficient, and longer context attention with no downsides.
 
+Update: Unfortunately, Robin's experiments showed much worse evaluation FID scores not reflected in the loss. Pending more experiments. Use this library with caution
+
 ## Status (wip)
 
 At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not.
