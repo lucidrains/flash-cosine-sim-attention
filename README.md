@@ -8,7 +8,9 @@ Implementation of fused cosine similarity attention in the same style as <a href
 
 In other words, stable, fast, memory efficient, and longer context attention with no downsides.
 
-Update: Unfortunately, Robin's experiments showed much worse evaluation FID scores not reflected in the loss. Pending more experiments. Use this library with caution
+Update: Unfortunately, Robin's experiments showed much worse evaluation FID scores not reflected in the loss. Pending more experiments. Use this library with caution.
+
+Update 2: The only saving grace would be to use <a href="https://github.com/lucidrains/flash-cosine-sim-attention/blob/main/train.py#L58">grouped l2norm</a>, which could potentially allow for more expressivity. If anyone can evaluate this technique on their generative work and obtain some FID scores, would be much appreciated.
 
 ## Status (wip)
 
