@@ -762,6 +762,24 @@ namespace mma {
             }
         }
 
+        // directly set global memory from registers
+        template<typename accessor>
+        __device__ void store(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                int row = i * N_warp + thread_y + tile_y;
+                #pragma unroll
+                for (int j = 0; j < M_thread ; j++) {
+                    int col = j * M_warp + thread_x + tile_x;
+
+                    if ((max_x > 0  && col >= max_x) || (max_y > 0 && row >= max_y))
+                        continue;
+
+                    gmem[row][col] = C_frag[i * M_thread + j];
+                }
+            }
+        }
+
         // Stream C from registers to global memory using temporary shared memory buffer
         template<typename accessor, typename shared_fragment>
         __device__ void store(accessor gmem, shared_fragment& smem, int tile_x, int tile_y, int max_x, int max_y) {
@@ -997,6 +1015,27 @@ namespace mma {
             }
         }
 
+        // directly set global memory from registers
+        template<typename accessor>
+        __device__ void store(accessor gmem, int tile_x, int tile_y, int max_x, int max_y) {
+            #pragma unroll
+            for (int i = 0; i < N_thread; i++) {
+                #pragma unroll
+                for (int j = 0; j < M_thread; j++) {
+                    #pragma unroll
+                    for (int k = 0; k < C_frag[i * M_thread + j].num_elements; k++) {
+                        int col = get_warp_col(k) + (warp_x * M_thread + j) * M_warp + tile_x;
+                        int row = get_warp_row(k) + (warp_y * N_thread + i) * N_warp + tile_y;
+
+                        if ((max_x > 0  && col >= max_x) || (max_y > 0 && row >= max_y))
+                            continue;
+
+                        gmem[row][col] = C_frag[i * M_thread + j].x[k];
+                    }
+                }
+            }
+        }
+
         // Stream C from registers to global memory using temporary shared memory buffer
         template<typename accessor, typename shared_fragment>
         __device__ void store(accessor gmem, shared_fragment& smem, int tile_x, int tile_y, int max_x, int max_y) {
@@ -1085,23 +1124,17 @@ __global__ void forward_kernel(
     using C_sm_t = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size, false>;
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
-    using O_sm_t = mem::shared_fragment<scalar_t, row_tile_size, dim_head>;
 
     // determine shared memory size
 
     __shared__ scalar_t _shared_mem[
+        Q_sm_t::size * forward_q_store_num_frags +
         max_(
-            (
-                Q_sm_t::size * forward_q_store_num_frags +
-                max_(
-                    K_sm_t::size,
-                    V_sm_t::size
-                ) +
-                C_sm_t::size +
-                L_sm_t::size
-            ),
-            O_sm_t::size
-        )
+            K_sm_t::size,
+            V_sm_t::size
+        ) +
+        C_sm_t::size +
+        L_sm_t::size
     ];
 
     // layout shared memory
@@ -1109,7 +1142,6 @@ __global__ void forward_kernel(
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
 
     Q_sm_t Q_sm{__shared_mem};
-    O_sm_t O_sm{__shared_mem};
 
     K_sm_t K_sm{Q_sm.next()};
     V_sm_t V_sm{Q_sm.next()};
@@ -1216,7 +1248,7 @@ __global__ void forward_kernel(
 
     L_acc.multiply(L_sm.smem, out_mma);
 
-    out_mma.store(O_, O_sm, 0, row_tile_offset, 0, row_seq_len);
+    out_mma.store(O_, 0, row_tile_offset, 0, row_seq_len);
 }
 
 // backwards preprocess
