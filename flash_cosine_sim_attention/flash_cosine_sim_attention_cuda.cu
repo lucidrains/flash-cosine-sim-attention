@@ -1102,7 +1102,7 @@ __global__ void forward_kernel(
     // registers
 
     using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
-    using out_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head, true>;
+    using out_mma_t = mma::warp_tile<float, tpb, row_tile_size, dim_head, true>;
 
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
@@ -1121,7 +1121,7 @@ __global__ void forward_kernel(
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
-    using C_sm_t = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
+    using C_sm_t = mem::shared_fragment<float, col_tile_size, row_tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size, false>;
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
 
@@ -1132,7 +1132,10 @@ __global__ void forward_kernel(
         max_(
             K_sm_t::size,
             V_sm_t::size
-        ) +
+        )
+    ];
+
+    __shared__ float _shared_mem_float[
         C_sm_t::size +
         L_sm_t::size
     ];
@@ -1140,6 +1143,7 @@ __global__ void forward_kernel(
     // layout shared memory
 
     auto __shared_mem = reinterpret_cast<char*>(_shared_mem);
+    auto __shared_mem_float = reinterpret_cast<char*>(_shared_mem_float);
 
     Q_sm_t Q_sm{__shared_mem};
 
@@ -1148,8 +1152,8 @@ __global__ void forward_kernel(
 
     auto next_ptr = K_sm_t::size > V_sm_t::size ? K_sm.next() : V_sm.next();
 
-    C_sm_t C_sm{next_ptr};
-    mask_sm_t mask_sm{next_ptr};
+    C_sm_t C_sm{__shared_mem_float};
+    mask_sm_t mask_sm{__shared_mem_float};
 
     L_sm_t L_sm{C_sm.next()};
 
@@ -1207,18 +1211,9 @@ __global__ void forward_kernel(
                 (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
-            float shift = scale;
-
-            if (causal && seq_len_diff == 0) {
-                if (attn_row == 0)
-                    return 1.f;
-
-                shift = min(shift, (float) attn_row);
-            }
-
             float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return __expf(scale * el + bias - shift);
+            return __expf(scale * el  - scale + bias);
         });
 
         if (has_mask)
@@ -1525,18 +1520,9 @@ __global__ void backward_kernel(
                 (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
-            float shift = scale;
-
-            if (causal && seq_len_diff == 0) {
-                if (attn_row == 0)
-                    return 1.f;
-
-                shift = min(shift, (float) attn_row);
-            }
-
             float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
 
-            return __expf(scale * el + bias - shift) * L_sm.smem[row];
+            return __expf(scale * el - scale + bias) * L_sm.smem[row];
         });
 
         QK_mma.store(C_sm);
