@@ -38,9 +38,10 @@ def top_k(logits, thres = 0.9):
 
 # attention and feedforward
 
-def FeedForward(dim, mult = 4):
+def FeedForward(dim, mult = 4, pre_norm = False):
     dim_hidden = int(dim * mult)
     return nn.Sequential(
+        nn.LayerNorm(dim) if pre_norm else nn.Identity(),
         nn.Linear(dim, dim_hidden, bias = False),
         nn.GELU(),
         nn.Linear(dim_hidden, dim, bias = False)
@@ -54,11 +55,15 @@ class Attention(nn.Module):
         heads = 8,
         scale = 8,
         l2norm_groups = 1,
+        pre_norm = False,
         use_cuda_kernel = False,
         **kwargs
     ):
         super().__init__()
         inner_dim = dim_head * heads
+
+        self.norm = nn.LayerNorm(dim) if pre_norm else nn.Identity()
+
         self.scale = scale
         self.heads = heads
 
@@ -72,6 +77,8 @@ class Attention(nn.Module):
 
     def forward(self, x):
         h, scale, l2norm_groups = self.heads, self.scale, self.l2norm_groups
+
+        x = self.norm(x)
 
         q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
@@ -96,6 +103,7 @@ class CosineSimCausalTransformer(nn.Module):
         heads = 8,
         dim_head = 64,
         use_cuda_kernel = False,
+        pre_norm = False,
         **kwargs
     ):
         super().__init__()
@@ -104,20 +112,24 @@ class CosineSimCausalTransformer(nn.Module):
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
 
-        self.residual_scale = (2 * depth) ** 0.25
+        self.residual_scale = 1 if pre_norm else ((2 * depth) ** 0.25)
 
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale, groups = attn_l2norm_groups, **kwargs),
-                nn.LayerNorm(dim),
-                FeedForward(dim),
-                nn.LayerNorm(dim),
+                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale, groups = attn_l2norm_groups, pre_norm = pre_norm, **kwargs),
+                nn.LayerNorm(dim) if not pre_norm else nn.Identity(),
+                FeedForward(dim, pre_norm = pre_norm),
+                nn.LayerNorm(dim) if not pre_norm else nn.Identity(),
             ]))
 
-        self.to_logits = nn.Linear(dim, num_tokens, bias = False)
+        self.to_logits = nn.Sequential(
+            nn.LayerNorm(dim) if pre_norm else nn.Identity(),
+            nn.Linear(dim, num_tokens, bias = False)
+        )
 
-        self.init_(depth)
+        if not pre_norm:
+            self.init_(depth)
 
     def init_(self, depth):
         nn.init.normal_(self.token_emb.weight, std = 1e-5)
@@ -130,10 +142,10 @@ class CosineSimCausalTransformer(nn.Module):
             init_weight_xavier_normal_(attn.to_k, 1.)
             init_weight_xavier_normal_(attn.to_v, init_gain)
             init_weight_xavier_normal_(attn.to_out, init_gain)
-            init_weight_xavier_normal_(ff[0], init_gain)
-            init_weight_xavier_normal_(ff[2], init_gain)
+            init_weight_xavier_normal_(ff[1], init_gain)
+            init_weight_xavier_normal_(ff[3], init_gain)
 
-        init_weight_xavier_normal_(self.to_logits, 1)
+        init_weight_xavier_normal_(self.to_logits[-1], 1)
 
     @torch.no_grad()
     @eval_decorator
