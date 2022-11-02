@@ -1,6 +1,6 @@
 import torch
 from functools import partial
-from torch import nn
+from torch import nn, einsum
 import torch.nn.functional as F
 
 try:
@@ -26,6 +26,15 @@ def eval_decorator(fn):
         model.train(was_training)
         return out
     return inner
+
+def non_cosine_sim_attn_fn(q, k, v, **kwargs):
+    q = q * (q.shape[-1] ** -0.5)
+    sim = einsum('b h i d, b h j d -> b h i j', q, k)
+    i, j = sim.shape[-2:]
+    causal_mask = torch.ones((i, j), dtype = torch.bool, device = q.device).triu(j - i + 1)
+    sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
+    attn = sim.softmax(dim = -1)
+    return einsum('b h i j, b h j d -> b h i d', attn, v)
 
 # top k filtering
 
@@ -57,6 +66,7 @@ class Attention(nn.Module):
         l2norm_groups = 1,
         pre_norm = False,
         use_cuda_kernel = False,
+        non_cosine_sim_attn = False,
         **kwargs
     ):
         super().__init__()
@@ -68,7 +78,13 @@ class Attention(nn.Module):
         self.heads = heads
 
         self.l2norm_groups = l2norm_groups
-        self.attn_fn = plain_cosine_sim_attention if not use_cuda_kernel else partial(flash_cosine_sim_attention, **kwargs)
+
+        if non_cosine_sim_attn:
+            self.attn_fn = non_cosine_sim_attn_fn
+        elif use_cuda_kernel:
+            self.attn_fn = partial(flash_cosine_sim_attention, **kwargs)
+        else:
+            self.attn_fn = plain_cosine_sim_attention
 
         self.to_q = nn.Linear(dim, inner_dim, bias = False)
         self.to_k = nn.Linear(dim, inner_dim, bias = False)
@@ -104,6 +120,7 @@ class CosineSimCausalTransformer(nn.Module):
         dim_head = 64,
         use_cuda_kernel = False,
         pre_norm = False,
+        non_cosine_sim_attn = False,
         **kwargs
     ):
         super().__init__()
@@ -117,7 +134,7 @@ class CosineSimCausalTransformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale, groups = attn_l2norm_groups, pre_norm = pre_norm, **kwargs),
+                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale, groups = attn_l2norm_groups, pre_norm = pre_norm, non_cosine_sim_attn = non_cosine_sim_attn, **kwargs),
                 nn.LayerNorm(dim) if not pre_norm else nn.Identity(),
                 FeedForward(dim, pre_norm = pre_norm),
                 nn.LayerNorm(dim) if not pre_norm else nn.Identity(),

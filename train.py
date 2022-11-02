@@ -58,6 +58,7 @@ model = CosineSimCausalTransformer(
     attn_l2norm_groups = 8,
     dim_head = 64,
     pre_norm = True,
+    non_cosine_sim_attn = False,
     max_seq_len = SEQ_LEN,
     use_cuda_kernel = args.use_cuda_kernel
 )
