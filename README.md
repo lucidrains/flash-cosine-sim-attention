@@ -12,6 +12,8 @@ Update: Unfortunately, Robin's experiments showed much worse evaluation FID scor
 
 Update 2: The only saving grace would be to use <a href="https://github.com/lucidrains/flash-cosine-sim-attention/blob/main/train.py#L58">grouped l2norm</a>, which could potentially allow for more expressivity. If anyone can evaluate this technique on their generative work and obtain some FID scores, would be much appreciated.
 
+Update 3: An approach similar to cosine sim attention has been proven at scale, with <a href="https://arxiv.org/abs/2302.05442">a 22B parameter vision model</a> from Brain.
+
 ## Status (wip)
 
 At the moment, autoregressive and variable lengthed sequences should be faster across all architectures. For sequences longer than 2048, it will also be memory efficient where regular attention would not.
