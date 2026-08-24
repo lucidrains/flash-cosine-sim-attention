@@ -1,0 +1,55 @@
+[build-system]
+# the cuda extension needs torch and nvcc to build, so it is compiled
+# against the environment's torch - use `uv build --no-build-isolation`
+# when torch is installed; the build otherwise falls back to a pure
+# python package, and the kernel is compiled just in time on first use
+requires = ["setuptools>=77", "wheel"]
+build-backend = "_build_backend"
+backend-path = ["."]
+
+[project]
+name = "flash-cosine-sim-attention"
+version = "0.2.2"
+description = "Flash Cosine Similarity Attention"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Phil Wang", email = "lucidrains@gmail.com" },
+]
+requires-python = ">=3.8"
+keywords = [
+  "artificial intelligence",
+  "deep learning",
+  "attention mechanism",
+]
+dependencies = [
+  "torch>=1.10",
+  "einops",
+  "numpy",
+  "tqdm",
+  "ninja",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/lucidrains/flash-cosine-sim-attention"
+
+[project.optional-dependencies]
+triton = ["triton>=2.1"]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["flash_cosine_sim_attention"]
+
+[tool.pytest.ini_options]
+addopts = "--verbose"
+python_files = "tests/*.py"
+
+[tool.uv]
+package = true

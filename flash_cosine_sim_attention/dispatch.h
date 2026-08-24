@@ -37,7 +37,7 @@
 
 #define AT_TYPE_DISPATCH_CASE(TYPE_NAME, CASE_CODE, x)                            \
     case x: {                                                                     \
-        using TYPE_NAME C10_UNUSED_DISPATCH_CUDA_WORKAROUND =                     \
+        using TYPE_NAME C10_UNUSED =                                              \
           typename c10::impl::ScalarTypeToCPPType<x>::type;                       \
         REMOVE_PAREN(CASE_CODE)                                                   \
         break;                                                                    \

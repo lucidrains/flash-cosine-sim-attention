@@ -891,28 +891,12 @@ namespace mma {
 
         __device__ int get_warp_row(int i) {
             int tid = threadIdx.x % 32;
-            #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
-                if (std::is_same<output_t, half>::value) {
-                    return (tid & 3) + ((tid & 4) << 1) + ((tid & 16) >> 2);
-                } else {
-                    return (tid & 16) / 4 + 2 * (tid & 4) + (tid & 1) + (i & 2);
-                }
-            #else
-                return (i & 2) * 4 + tid / 4;
-            #endif
+            return (i & 2) * 4 + tid / 4;
         }
 
         __device__ int get_warp_col(int i) {
             int tid = threadIdx.x % 32;
-            #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 700)
-                if (std::is_same<output_t, half>::value) {
-                    return (i & 7) + (tid & 8);
-                } else {
-                    return (tid & 10) + (i & 5);
-                }
-            #else
-                return (tid % 4) * 2 + i % 2 + (i & 4) * 2;
-            #endif
+            return (tid % 4) * 2 + i % 2 + (i & 4) * 2;
         }
 
         // Perform a pointwise operation, specified by the given lambda, on C
@@ -1070,19 +1054,17 @@ namespace mma {
 // forward kernel
 
 template <typename scalar_t, int row_tile_size, int col_tile_size, int dim_head, int tpb>
-__global__ void forward_kernel(
+__global__ void __launch_bounds__(tpb, 4)
+forward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
           PackedAccessor<scalar_t, 4> o,
           PackedAccessor<float, 3> inv_l,
     const PackedAccessor<bool, 2> mask,
-    const PackedAccessor<scalar_t, 3> attn_bias,
     const float scale,
     const bool causal,
     const bool has_mask,
-    const bool has_attn_bias,
-    const bool attn_bias_batch_dim,
     const bool need_store_rowsum,
     const bool is_single_head_kv
 ) {
@@ -1102,7 +1084,7 @@ __global__ void forward_kernel(
     // registers
 
     using QK_mma_t  = mma::warp_tile<scalar_t, tpb, row_tile_size, col_tile_size, true>;
-    using out_mma_t = mma::warp_tile<float, tpb, row_tile_size, dim_head, true>;
+    using out_mma_t = mma::warp_tile<scalar_t, tpb, row_tile_size, dim_head, true>;
 
     QK_mma_t  QK_mma;
     out_mma_t out_mma;
@@ -1110,34 +1092,31 @@ __global__ void forward_kernel(
 
     // shared memory templates and hyperparams
 
-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-        static constexpr int forward_q_store_num_frags = 1;
-    #else
-        static constexpr int forward_q_store_num_frags = 1;
-    #endif
-
-    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size, true, forward_q_store_num_frags, dim_head / chunk_size>;
+    using Q_sm_t = mem::shared_fragment<scalar_t, chunk_size, row_tile_size>;
 
     using K_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
-    using C_sm_t = mem::shared_fragment<float, col_tile_size, row_tile_size>;
+    // attention matrix (P) tile - for half precision, stored in half so it can
+    // be fed directly to the tensor core mma for the output projection
+
+    using C_sm_t = mem::shared_fragment<scalar_t, col_tile_size, row_tile_size>;
     using mask_sm_t = mem::shared_fragment<bool, 1, col_tile_size, false>;
     using L_sm_t = mem::shared_fragment<float, row_tile_size, 1, false>;
 
     // determine shared memory size
 
     __shared__ scalar_t _shared_mem[
-        Q_sm_t::size * forward_q_store_num_frags +
+        Q_sm_t::size +
         max_(
             K_sm_t::size,
             V_sm_t::size
         )
     ];
 
-    __shared__ float _shared_mem_float[
-        C_sm_t::size +
-        L_sm_t::size
+    __shared__ char _shared_mem_float[
+        C_sm_t::size * sizeof(scalar_t) +
+        L_sm_t::size * sizeof(float)
     ];
 
     // layout shared memory
@@ -1165,7 +1144,6 @@ __global__ void forward_kernel(
     auto l_ = inv_l[batch][heads];
     auto O_ = o[batch][heads];
     auto mask_ = mask[batch];
-    auto bias_ = attn_bias[attn_bias_batch_dim ? batch : heads];
 
     // zero accumulators
 
@@ -1201,7 +1179,7 @@ __global__ void forward_kernel(
 
         // scale and exponentiation, depending on masking or not
 
-        QK_mma.pointwise([&](scalar_t el, int col, int row) -> scalar_t {
+        QK_mma.pointwise([&](float el, int col, int row) -> float {
             int attn_col = col + col_tile_offset;
             int attn_row = row + row_tile_offset;
 
@@ -1211,9 +1189,7 @@ __global__ void forward_kernel(
                 (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
-            float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
-
-            return __expf(scale * el  - scale + bias);
+            return __expf(scale * el - scale);
         });
 
         if (has_mask)
@@ -1257,7 +1233,7 @@ template <typename scalar_t, int dim_head>
 __global__ void backward_preprocess(
     const PackedAccessor<scalar_t, 4> d_out,
     const PackedAccessor<scalar_t, 4> o,
-          PackedAccessor<scalar_t, 3> delta
+          PackedAccessor<float, 3> delta
 ) {
     const int heads = o.size(1);
 
@@ -1277,9 +1253,9 @@ __global__ void backward_preprocess(
 
     // shared memory
 
-    __shared__ scalar_t _shared_mem_preprocess[max_(dim_head / 32, 1)];
+    __shared__ float _shared_mem_preprocess[max_(dim_head / 32, 1)];
 
-    scalar_t* sm_delta  = reinterpret_cast<scalar_t*>(&_shared_mem_preprocess);
+    float* sm_delta  = reinterpret_cast<float*>(&_shared_mem_preprocess);
 
     // global mem accessors
 
@@ -1290,7 +1266,7 @@ __global__ void backward_preprocess(
     // load do_scaled * o into registers
 
     if (dim_idx < dim_head)
-        val = do_[dim_idx] * o_[dim_idx];
+        val = (float) do_[dim_idx] * (float) o_[dim_idx];
 
     // warp shuffle reduce
 
@@ -1301,7 +1277,7 @@ __global__ void backward_preprocess(
     if (dim_head <= 32) {
         // if dimension of head is 32, no need to reduce across shared memory
         if (dim_idx == 0)
-            delta_[seq_idx] = (scalar_t) val;
+            delta_[seq_idx] = val;
 
         return;
     }
@@ -1331,31 +1307,27 @@ __global__ void backward_preprocess(
     if (dim_idx != 0)
         return;
 
-    delta_[seq_idx] = (scalar_t) val;
+    delta_[seq_idx] = val;
 }
 
 // backward kernel
 
 template <typename scalar_t, typename kv_scalar_t, int row_tile_size, int col_tile_size, int dim_head, int tpb>
-__global__ void backward_kernel(
+__global__ void __launch_bounds__(tpb, 4)
+backward_kernel(
     const PackedAccessor<scalar_t, 4> q,
     const PackedAccessor<scalar_t, 4> k,
     const PackedAccessor<scalar_t, 4> v,
     const PackedAccessor<float, 3> inv_l,
     const PackedAccessor<bool, 2> mask,
-    const PackedAccessor<scalar_t, 3> attn_bias,
           PackedAccessor<float, 4> dq,
           PackedAccessor<kv_scalar_t, 4> dk,
           PackedAccessor<kv_scalar_t, 4> dv,
-          PackedAccessor<float, 3> d_attn_bias,
     const PackedAccessor<scalar_t, 4> d_out_scaled,
-    const PackedAccessor<scalar_t, 3> delta,
+    const PackedAccessor<float, 3> delta,
     const float scale,
     const bool causal,
     const bool has_mask,
-    const bool has_attn_bias,
-    const bool attn_bias_batch_dim,
-    const bool attn_bias_requires_grad,
     const bool is_single_head_kv
 ) {
 
@@ -1393,9 +1365,20 @@ __global__ void backward_kernel(
     using Q_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
 
     using L_sm_t = mem::shared_fragment<float, 1, row_tile_size, false>;
-    using D_sm_t = mem::shared_fragment<scalar_t, 1, row_tile_size, false>;
+    using D_sm_t = mem::shared_fragment<float, 1, row_tile_size, false>;
 
-    using K_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
+    // cache as much of the key tile as fits in shared memory on Ampere and newer,
+    // so it is not reloaded for every row tile
+
+    static constexpr int backward_k_store_num_frags =
+    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+        (std::is_same<scalar_t, at::Half>::value ? min_(dim_head / chunk_size, 4) : 1)
+    #else
+        1
+    #endif
+    ;
+
+    using K_sm_t_ = mem::shared_fragment<scalar_t, chunk_size, col_tile_size, true, backward_k_store_num_frags, dim_head / chunk_size>;
     using K_sm_ = mem::shared_fragment<scalar_t, chunk_size, dim_head>;
     using V_sm_t = mem::shared_fragment<scalar_t, chunk_size, col_tile_size>;
 
@@ -1414,15 +1397,16 @@ __global__ void backward_kernel(
     __shared__ scalar_t _shared_mem[
         max_(
             max_(
-                max_(Q_sm_::size, Q_sm_t_::size) +
-                max_(K_sm_::size, K_sm_t_::size, V_sm_t::size) +
+                max_(Q_sm_::size, Q_sm_t_::size, DO_sm_::size, DO_sm_t_::size, L_sm_t::size, K_sm_::size) +
+                K_sm_t_::size +
                 D_sm_t::size +
                 max_(C_sm_::size, C_sm_t_::size) +
                 mask_sm_t::size
             ),
             DK_sm_t::size,
             DV_sm_t::size
-        )
+        ) +
+        V_sm_t::size
     ];
 
     // shared memory layout
@@ -1431,6 +1415,7 @@ __global__ void backward_kernel(
 
     Q_sm_ Q_sm{__shared_mem};
     Q_sm_t_ Q_sm_t{__shared_mem};
+    K_sm_ K_sm{__shared_mem};
 
     DO_sm_ DO_sm{__shared_mem};
     DO_sm_t_ DO_sm_t{__shared_mem};
@@ -1440,13 +1425,14 @@ __global__ void backward_kernel(
     DK_sm_t DK_sm{__shared_mem};
     DV_sm_t DV_sm{__shared_mem};
 
-    auto next_ptr = (dim_head > row_tile_size) ? DO_sm.next() : DO_sm_t.next();
+    // the cached key tile gets its own dedicated region, so that the
+    // other key / value buffers loaded later can never clobber it
 
-    K_sm_ K_sm{next_ptr};
-    K_sm_t_ K_sm_t{next_ptr};
-    V_sm_t V_sm{next_ptr};
+    K_sm_t_ K_sm_t{
+        __shared_mem + max_(Q_sm_::size, Q_sm_t_::size, DO_sm_::size, DO_sm_t_::size, L_sm_t::size, K_sm_::size) * sizeof(scalar_t)
+    };
 
-    auto next_ptr_ = (dim_head > row_tile_size) ? K_sm.next() : K_sm_t.next();
+    auto next_ptr_ = K_sm_t.next();
 
     D_sm_t D_sm{next_ptr_};
 
@@ -1455,6 +1441,8 @@ __global__ void backward_kernel(
 
     auto next_ptr__ = C_sm_::size > C_sm_t_::size ? C_sm.next() : C_sm_t.next();
     mask_sm_t mask_sm{next_ptr__};
+
+    V_sm_t V_sm{mask_sm.next()};
 
     // shortcut accessors
 
@@ -1468,11 +1456,6 @@ __global__ void backward_kernel(
     auto delta_ = delta[batch_idx][head_idx];
     auto do_ = d_out_scaled[batch_idx][head_idx];
     auto mask_ = mask[batch_idx];
-
-    // handle attention bias
-
-    auto ds_ = has_attn_bias ? d_attn_bias[attn_bias_batch_dim ? batch_idx : head_idx] : d_attn_bias[0];
-    auto bias_ = has_attn_bias ? attn_bias[attn_bias_batch_dim ? batch_idx : head_idx] : attn_bias[0];
 
     // loop over column tiles
 
@@ -1493,7 +1476,9 @@ __global__ void backward_kernel(
 
         // get qk similarity matrix
 
-        for (int k = 0; k < dim_head; k += chunk_size) {
+        for (int k = 0, j = 0; k < dim_head; k += chunk_size, j++) {
+            K_sm_t.set_frag_idx(j);
+
             Q_sm_t.load_transpose(q_, k, row_tile_offset, 0, row_seq_len);
             K_sm_t.load_transpose(k_, k, col_tile_offset, 0, col_seq_len);
             __syncthreads();
@@ -1520,9 +1505,7 @@ __global__ void backward_kernel(
                 (has_mask && !mask_sm.smem[col]))
                 return 0.f;
 
-            float bias = has_attn_bias ? (float) bias_[attn_row][attn_col] : 0.f;
-
-            return __expf(scale * el - scale + bias) * L_sm.smem[row];
+            return __expf(scale * el - scale) * L_sm.smem[row];
         });
 
         QK_mma.store(C_sm);
@@ -1560,20 +1543,20 @@ __global__ void backward_kernel(
 
         // delta = rowsum(do * o), precomputed in backward preprocess
         // calculate ds = dp - delta
+        // out of bounds rows are zeroed out, as their delta is never
+        // computed and the uninitialized memory must not leak into the
+        // query and key gradients
 
         dP_mma.pointwise([&](scalar_t el, int, int row) -> scalar_t {
+            if ((row + row_tile_offset) >= row_seq_len)
+                return 0.f;
+
             return (el - D_sm.smem[row]);
         });
 
         // calculate ds = (dp - delta) * p
 
         dP_mma.elem_mult(QK_mma);
-
-        // accumulate to ds if needed
-
-        if (has_attn_bias) {
-            dP_mma.atomic_add(ds_, row_tile_offset, col_tile_offset, row_seq_len, col_seq_len);
-        }
 
         // scale
 
@@ -1632,8 +1615,6 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     torch::Tensor k,
     torch::Tensor v,
     at::optional<torch::Tensor> mask,
-    at::optional<torch::Tensor> attn_bias,
-    bool attn_bias_batch_dim,
     float scale,
     bool causal
 ) {
@@ -1649,7 +1630,6 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     if (is_merged_batch_head) {
         assert(('if batch and heads are merged for queries, keys and values must also similarly have only 3 dimensions', k.ndimension() == 3 && v.ndimension() == 3));
 
-        attn_bias_batch_dim = true;
         q = q.unsqueeze(1);
     }
 
@@ -1678,7 +1658,6 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
 
     const bool is_single_head_kv = heads > 1 && kv_heads == 1;
 
-    const bool has_attn_bias     = attn_bias.has_value();
     const bool has_mask          = mask.has_value();
 
     auto options = torch::TensorOptions().device(query_device);
@@ -1686,11 +1665,10 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
     // optionals
 
     auto mask_value = has_mask ? mask.value() : at::empty({batch, 0}, options.dtype(torch::kBool));
-    auto attn_bias_value = has_attn_bias ? attn_bias.value() : at::empty({1, 0, 0}, options.dtype(q_scalar_type));
 
     // should backwards, determines whether to store row sum
 
-    bool should_backwards = q.requires_grad() || k.requires_grad() || v.requires_grad() || attn_bias_value.requires_grad();
+    bool should_backwards = q.requires_grad() || k.requires_grad() || v.requires_grad();
 
     // create intermediate or output tensors
 
@@ -1724,12 +1702,9 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
             ACCESSOR(o, 4, scalar_t),
             ACCESSOR(l, 3, float),
             ACCESSOR(mask_value, 2, bool),
-            ACCESSOR(attn_bias_value, 3, scalar_t),
             scale,
             causal,
             has_mask,
-            has_attn_bias,
-            attn_bias_batch_dim,
             should_backwards,
             is_single_head_kv
         );
@@ -1749,7 +1724,7 @@ std::tuple<at::Tensor, at::Tensor, bool> flash_cosine_sim_attention_forward(
 
 // backwards c++ function
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tensor>> flash_cosine_sim_attention_backward(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> flash_cosine_sim_attention_backward(
     torch::Tensor d_out,
     torch::Tensor o,
     torch::Tensor l,
@@ -1757,8 +1732,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
     torch::Tensor k,
     torch::Tensor v,
     at::optional<torch::Tensor> mask,
-    at::optional<torch::Tensor> attn_bias,
-    bool attn_bias_batch_dim,
     float scale,
     bool causal
 ) {
@@ -1800,31 +1773,25 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
 
     const bool is_single_head_kv = heads > 1 && kv_heads == 1;
 
-    const bool has_attn_bias     = attn_bias.has_value();
     const bool has_mask          = mask.has_value();
-
-    const bool attn_bias_requires_grad = has_attn_bias && attn_bias.value().requires_grad();
 
     auto options = torch::TensorOptions().device(query_device);
 
     // optionals
 
     auto mask_value = has_mask ? mask.value() : at::empty({batch, 0}, options.dtype(torch::kBool));
-    auto attn_bias_value = has_attn_bias ? attn_bias.value() : at::empty({1, 0, 0}, options.dtype(q_scalar_type));
 
     // create intermediate or output tensors
 
     auto options_kfloat_dtype = options.dtype(torch::kFloat);
     auto options_q_dtype = options.dtype(q_scalar_type);
 
-    auto delta = at::empty({batch, heads, seq}, options.dtype(q_scalar_type));
+    auto delta = at::empty({batch, heads, seq}, options.dtype(at::kFloat));
 
     auto dq = at::zeros_like(q, options_kfloat_dtype);
 
     auto dk = is_single_head_kv ? at::zeros_like(k, options_kfloat_dtype) : at::empty_like(k, options_q_dtype);
     auto dv = is_single_head_kv ? at::zeros_like(v, options_kfloat_dtype) : at::empty_like(k, options_q_dtype);
-
-    auto db = (has_attn_bias && attn_bias_requires_grad) ? at::zeros_like(attn_bias_value, options_kfloat_dtype) : at::empty({attn_bias_value.size(0), 0, 0}, options_kfloat_dtype);
 
     auto dk_scalar_type = dk.scalar_type();
 
@@ -1846,7 +1813,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
         backward_preprocess<scalar_t, dim_head><<<preprocess_blocks, preprocess_threads_per_block>>>(
             ACCESSOR(d_out, 4, scalar_t),
             ACCESSOR(o, 4, scalar_t),
-            ACCESSOR(delta, 3, scalar_t)
+            ACCESSOR(delta, 3, float)
         );
 
         const int tpb = layout::tpb<scalar_t, dim_head>::TPB;
@@ -1864,19 +1831,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
             ACCESSOR(v, 4, scalar_t),
             ACCESSOR(l, 3, float),
             ACCESSOR(mask_value, 2, bool),
-            ACCESSOR(attn_bias_value, 3, scalar_t),
             ACCESSOR(dq, 4, float),
             ACCESSOR(dk, 4, kv_scalar_t),
             ACCESSOR(dv, 4, kv_scalar_t),
-            ACCESSOR(db, 3, float),
             ACCESSOR(d_out, 4, scalar_t),
-            ACCESSOR(delta, 3, scalar_t),
+            ACCESSOR(delta, 3, float),
             scale,
             causal,
             has_mask,
-            has_attn_bias,
-            attn_bias_batch_dim,
-            attn_bias_requires_grad,
             is_single_head_kv
         );
 
@@ -1908,12 +1870,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, at::optional<torch::Tens
         dv = dv.to(q_scalar_type);
     }
 
-    at::optional<torch::Tensor> return_db;
-
-    if (has_attn_bias)
-        return_db = db.to(q_scalar_type);
-
-    return { dq, dk, dv, return_db };
+    return { dq, dk, dv };
 }
 
 // debug

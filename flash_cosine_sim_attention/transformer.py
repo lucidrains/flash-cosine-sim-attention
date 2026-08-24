@@ -66,6 +66,7 @@ class Attention(nn.Module):
         l2norm_groups = 1,
         pre_norm = False,
         use_cuda_kernel = False,
+        use_triton = False,
         non_cosine_sim_attn = False,
         **kwargs
     ):
@@ -81,6 +82,8 @@ class Attention(nn.Module):
 
         if non_cosine_sim_attn:
             self.attn_fn = non_cosine_sim_attn_fn
+        elif use_triton:
+            self.attn_fn = partial(flash_cosine_sim_attention, use_triton = True, **kwargs)
         elif use_cuda_kernel:
             self.attn_fn = partial(flash_cosine_sim_attention, **kwargs)
         else:
@@ -119,6 +122,7 @@ class CosineSimCausalTransformer(nn.Module):
         heads = 8,
         dim_head = 64,
         use_cuda_kernel = False,
+        use_triton = False,
         pre_norm = False,
         non_cosine_sim_attn = False,
         **kwargs
@@ -134,7 +138,7 @@ class CosineSimCausalTransformer(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, scale = attn_scale, groups = attn_l2norm_groups, pre_norm = pre_norm, non_cosine_sim_attn = non_cosine_sim_attn, **kwargs),
+                Attention(dim, dim_head = dim_head, heads = heads, use_cuda_kernel= use_cuda_kernel, use_triton = use_triton, scale = attn_scale, groups = attn_l2norm_groups, pre_norm = pre_norm, non_cosine_sim_attn = non_cosine_sim_attn, **kwargs),
                 nn.LayerNorm(dim) if not pre_norm else nn.Identity(),
                 FeedForward(dim, pre_norm = pre_norm),
                 nn.LayerNorm(dim) if not pre_norm else nn.Identity(),

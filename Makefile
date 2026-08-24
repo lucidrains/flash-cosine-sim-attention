@@ -1,15 +1,12 @@
 
 install:
-	python setup.py install --user
+	pip install -e .
 
 install_requirements:
 	pip install -r requirements.txt
 
 test: install
-	python setup.py test
-
-test_new: install
-	python test_new.py
+	python -m pytest
 
 benchmark: install
 	python benchmark.py
@@ -32,5 +29,8 @@ benchmark_backward_causal: install
 train: install install_requirements
 	python train.py --use-cuda-kernel
 
+train_triton: install install_requirements
+	python train.py --use-triton
+
 clean:
-	rm -rf dist/ build/
+	rm -rf dist/ build/ *.egg-info

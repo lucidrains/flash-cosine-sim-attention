@@ -1,2 +1,25 @@
+# only the files needed to build the project from source
+
+include pyproject.toml
+include _build_backend.py
+include README.md
+include LICENSE
+
+recursive-include flash_cosine_sim_attention *.py
 recursive-include flash_cosine_sim_attention *.cu
 recursive-include flash_cosine_sim_attention *.h
+
+# everything else is development only
+
+prune tests
+prune data
+prune .git
+prune build
+prune dist
+prune .pytest_cache
+prune .eggs
+prune *.egg-info
+
+global-exclude *.so
+global-exclude *.pyc
+global-exclude __pycache__/*

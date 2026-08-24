@@ -16,6 +16,7 @@ from torch.cuda.amp import autocast, GradScaler
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--use-cuda-kernel', default = False, action = 'store_true')
+parser.add_argument('--use-triton', default = False, action = 'store_true')
 parser.add_argument('--use-float32', default = False, action = 'store_true')
 parser.add_argument('--seq-len', default = 1024, type = int)
 args = parser.parse_args()
@@ -60,7 +61,8 @@ model = CosineSimCausalTransformer(
     pre_norm = True,
     non_cosine_sim_attn = False,
     max_seq_len = SEQ_LEN,
-    use_cuda_kernel = args.use_cuda_kernel
+    use_cuda_kernel = args.use_cuda_kernel,
+    use_triton = args.use_triton
 )
 
 model.cuda()

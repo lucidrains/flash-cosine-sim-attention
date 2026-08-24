@@ -1,4 +1,4 @@
-argparse
 einops
 numpy
 tqdm
+triton>=2.1

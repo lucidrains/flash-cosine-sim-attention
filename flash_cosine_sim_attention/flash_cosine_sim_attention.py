@@ -10,7 +10,12 @@ from torch.autograd import Function
 
 exec(open(os.path.dirname(os.path.abspath(__file__)) + '/version.py').read())
 
-# try to import cuda
+# try to import cuda, falling back to just in time compilation of the
+# kernel from the bundled sources when a prebuilt extension is unavailable
+
+forward = None
+backward = None
+debug = None
 
 try:
     cuda_pkg = importlib.import_module(__cuda_pkg_name__)
@@ -20,7 +25,26 @@ try:
     debug = cuda_pkg.debug
 
 except ImportError:
-    print('CUDA extension for flash-cosine-sim-attention was not compiled correctly - please run `pip install flash-cosine-sim-attention --force-reinstall --no-cache-dir`')
+    try:
+        from torch.utils.cpp_extension import load
+
+        package_dir = os.path.dirname(os.path.abspath(__file__))
+
+        cuda_pkg = load(
+            name = __cuda_pkg_name__,
+            sources = [
+                os.path.join(package_dir, 'flash_cosine_sim_attention_cuda.cu')
+            ],
+            extra_include_paths = [package_dir],
+            with_cuda = True
+        )
+
+        forward = cuda_pkg.forward
+        backward = cuda_pkg.backward
+        debug = cuda_pkg.debug
+
+    except Exception:
+        print('CUDA extension for flash-cosine-sim-attention could not be compiled - please install torch and nvcc, or use the triton implementation with `use_triton = True`')
 
 # helper functions
 
@@ -77,13 +101,10 @@ def plain_cosine_sim_attention(
     k,
     v,
     mask = None,
-    attn_bias = None,
     scale = 8,
     groups = 1,
     causal = False,
-    l2norm_qk = True,
-    attn_bias_batch_dim = False
-
+    l2norm_qk = True
 ):
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
 
@@ -93,7 +114,6 @@ def plain_cosine_sim_attention(
     if is_merged_batch_heads_query:
         assert k.ndim == 3 and v.ndim ==3, 'if batch and heads are merged for queries, keys and values must also similarly have only 3 dimensions'
 
-        attn_bias_batch_dim = True
         q = q[:, None, ...]
 
     if l2norm_qk:
@@ -102,10 +122,6 @@ def plain_cosine_sim_attention(
     kv_einsum_eq = 'b j d' if single_head_kv else 'b h j d'
     sim = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', q, k)
     sim = sim * scale
-
-    if exists(attn_bias):
-        attn_bias = attn_bias.unsqueeze(1 if attn_bias_batch_dim else 0)
-        sim = sim + attn_bias
 
     mask_value = -torch.finfo(sim.dtype).max
 
@@ -130,14 +146,12 @@ def plain_cosine_sim_attention(
 def flash_cosine_sim_attention_cpu(
     q, k, v,
     mask,
-    attn_bias,
     scale,
     causal,
-    attn_bias_batch_dim,
     row_tile_size = 512,
     col_tile_size = 512
 ):
-    needs_backwards = any([exists(t) and t.requires_grad for t in (q, k, v, attn_bias)])
+    needs_backwards = any([exists(t) and t.requires_grad for t in (q, k, v)])
 
     assert not needs_backwards, 'cpu version does not support backwards'
     assert not (causal and exists(mask)), 'mask should not be supplied if causality is needed'
@@ -159,11 +173,7 @@ def flash_cosine_sim_attention_cpu(
     if is_merged_batch_heads_query:
         assert k.ndim == 3 and v.ndim ==3, 'if batch and heads are merged for queries, keys and values must also similarly have only 3 dimensions'
 
-        attn_bias_batch_dim = True
         q = q.unsqueeze(1)
-
-    if exists(attn_bias):
-        attn_bias = attn_bias.unsqueeze(1 if attn_bias_batch_dim else 0)
 
     kv_einsum_eq = 'b j d' if single_head_kv else 'b h j d'
 
@@ -180,35 +190,23 @@ def flash_cosine_sim_attention_cpu(
         mask = mask[:, None, None, :]
         mask = mask.split(col_tile_size, dim = -1)
 
-    if not exists(attn_bias):
-        attn_bias = (None,) * row_tiles
-    else:
-        attn_bias = attn_bias.split(row_tile_size, dim = -2)
-
     row_splits = zip(
         q.split(row_tile_size, dim = -2),
         o.split(row_tile_size, dim = -2),
-        l.split(row_tile_size, dim = -2),
-        attn_bias
+        l.split(row_tile_size, dim = -2)
     )
 
-    for ind, (qc, oc, lc, bc) in enumerate(row_splits):
+    for ind, (qc, oc, lc) in enumerate(row_splits):
         row_chunk_size = qc.shape[-2]
         q_start_index = ind * row_tile_size + seq_len_diff
-
-        if not exists(bc):
-            bc = (None,) * col_tiles
-        else:
-            bc = bc.split(col_tile_size, dim = -1)
 
         col_splits = zip(
             k.split(col_tile_size, dim = -2),
             v.split(col_tile_size, dim = -2),
-            mask,
-            bc
+            mask
         )
 
-        for k_ind, (kc, vc, maskc, bias) in enumerate(col_splits):
+        for k_ind, (kc, vc, maskc) in enumerate(col_splits):
             col_chunk_size = kc.shape[-2]
             k_start_index = k_ind * col_tile_size
 
@@ -216,9 +214,6 @@ def flash_cosine_sim_attention_cpu(
                 continue
 
             attn_weights = einsum(f'b h i d, {kv_einsum_eq} -> b h i j', qc, kc) * scale
-
-            if exists(bias):
-                attn_weights += bias
 
             if exists(maskc):
                 attn_weights.masked_fill_(~maskc, max_neg_value)
@@ -248,16 +243,12 @@ class FlashCosineSimAttention(Function):
         ctx,
         q, k, v,
         mask,
-        attn_bias,
         scale,
-        causal,
-        attn_bias_batch_dim
+        causal
     ):
         o, inv_l, should_backwards = forward(
             q, k, v,
             mask,
-            attn_bias,
-            attn_bias_batch_dim,
             scale,
             causal
         )
@@ -267,12 +258,11 @@ class FlashCosineSimAttention(Function):
 
         ctx.should_backwards = should_backwards
 
-        ctx.save_for_backward(o, inv_l, q, k, v, mask, attn_bias)
+        ctx.save_for_backward(o, inv_l, q, k, v, mask)
 
         ctx.params = (
             scale,
-            causal,
-            attn_bias_batch_dim
+            causal
         )
 
         return o
@@ -281,25 +271,22 @@ class FlashCosineSimAttention(Function):
     def backward(ctx, do):
         assert ctx.should_backwards
 
-        o, inv_l, q, k, v, mask, attn_bias = ctx.saved_tensors
+        o, inv_l, q, k, v, mask = ctx.saved_tensors
 
         (
             scale,
-            causal,
-            attn_bias_batch_dim
+            causal
         ) = ctx.params
 
-        dq, dk, dv, db = backward(
+        dq, dk, dv = backward(
             do, o, inv_l,
             q, k, v,
             mask,
-            attn_bias,
-            attn_bias_batch_dim,
             scale,
             causal
         )
 
-        return dq, dk, dv, None, db, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None
 
 flash_cosine_sim_attention_cuda = FlashCosineSimAttention.apply
 
@@ -310,25 +297,42 @@ def flash_cosine_sim_attention(
     k,
     v,
     mask = None,
-    attn_bias = None,
     scale = 8,
     groups = 1,
     causal = False,
     l2norm_qk = True,
-    attn_bias_batch_dim = False
+    use_triton = False,
+    sequence_parallel = True
 ):
+    if use_triton:
+        from flash_cosine_sim_attention.triton_flash_cosine_sim_attention import triton_flash_cosine_sim_attention
+
+        return triton_flash_cosine_sim_attention(
+            q, k, v,
+            mask = mask,
+            scale = scale,
+            groups = groups,
+            causal = causal,
+            l2norm_qk = l2norm_qk,
+            sequence_parallel = sequence_parallel
+        )
+
     if l2norm_qk:
         q, k = l2norm_tensors(q, k, groups = groups)
 
-    fn = flash_cosine_sim_attention_cuda if q.data.is_cuda else flash_cosine_sim_attention_cpu
+    if q.data.is_cuda:
+        if not exists(forward):
+            raise ImportError('flash-cosine-sim-attention CUDA extension is not compiled - please build it from source with torch and nvcc installed, or pass `use_triton = True` if triton is available')
+
+        fn = flash_cosine_sim_attention_cuda
+    else:
+        fn = flash_cosine_sim_attention_cpu
 
     o = fn(
         q, k, v,
         mask,
-        attn_bias,
         scale,
-        causal,
-        attn_bias_batch_dim
+        causal
     )
 
     return o
